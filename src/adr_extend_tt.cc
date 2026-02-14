@@ -5,6 +5,7 @@
 #include "nigiri/special_stations.h"
 
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -296,20 +297,24 @@ adr_ext adr_extend_tt(nigiri::timetable const& tt,
   // Compute importance = transport count weighted by clasz.
   ret.place_importance_.resize(place_location.size());
   ret.place_clasz_.resize(place_location.size());
+  ret.location_clasz_.resize(tt.n_locations());
   {
     auto const event_counts = utl::scoped_timer{"guesser event_counts"};
     for (auto i = n::kNSpecialStations; i < tt.n_locations(); ++i) {
       auto const l = n::location_idx_t{i};
 
+      auto mask = n::routing::clasz_mask_t{0U};
       auto transport_counts = std::array<unsigned, n::kNumClasses>{};
       for (auto const& r : tt.location_routes_[l]) {
         auto const clasz =
             static_cast<std::underlying_type_t<n::clasz>>(tt.route_clasz_[r]);
+        mask |= (1U << clasz);
         for (auto const tr : tt.route_transport_ranges_[r]) {
           transport_counts[clasz] +=
               tt.bitfields_[tt.transport_traffic_days_[tr]].count();
         }
       }
+      ret.location_clasz_[l] = mask;
 
       constexpr auto const prio =
           std::array<float, kClaszMax>{/* Air */ 300,
