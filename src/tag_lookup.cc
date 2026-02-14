@@ -23,30 +23,37 @@ namespace n = nigiri;
 namespace motis {
 
 trip_id<std::string_view> split_trip_id(std::string_view id) {
-  auto const [date, start_time, tag, trip_id] =
-      utl::split<'_', utl::cstr, utl::cstr, utl::cstr, utl::cstr>(id);
-
   auto ret = motis::trip_id{};
 
-  utl::verify<net::bad_request_exception>(date.valid(),
+  auto const first_sep = id.find('_');
+  auto const second_sep =
+      first_sep == std::string_view::npos ? std::string_view::npos
+                                          : id.find('_', first_sep + 1U);
+  auto const third_sep =
+      second_sep == std::string_view::npos ? std::string_view::npos
+                                           : id.find('_', second_sep + 1U);
+
+  utl::verify<net::bad_request_exception>(first_sep != std::string_view::npos,
                                           "invalid tripId date {}", id);
-  ret.start_date_ = date.view();
+  utl::verify<net::bad_request_exception>(
+      second_sep != std::string_view::npos, "invalid tripId start_time {}", id);
+  utl::verify<net::bad_request_exception>(third_sep != std::string_view::npos,
+                                          "invalid tripId tag {}", id);
 
-  utl::verify<net::bad_request_exception>(start_time.valid(),
-                                          "invalid tripId start_time {}", id);
-  ret.start_time_ = start_time.view();
+  ret.start_date_ = id.substr(0, first_sep);
+  ret.start_time_ = id.substr(first_sep + 1U, second_sep - first_sep - 1U);
+  ret.tag_ = id.substr(second_sep + 1U, third_sep - second_sep - 1U);
+  ret.trip_id_ = id.substr(third_sep + 1U);
 
-  utl::verify<net::bad_request_exception>(tag.valid(), "invalid tripId tag {}",
-                                          id);
-  ret.tag_ = tag.view();
-
+  utl::verify<net::bad_request_exception>(
+      !ret.start_date_.empty(), "invalid tripId date {}", id);
+  utl::verify<net::bad_request_exception>(
+      !ret.start_time_.empty(), "invalid tripId start_time {}", id);
+  utl::verify<net::bad_request_exception>(!ret.tag_.empty(),
+                                          "invalid tripId tag {}", id);
   // allow trip ids starting with underscore
-  auto const trip_id_len_plus_one =
-      static_cast<std::size_t>(id.data() + id.size() - tag.str) - tag.length();
-  utl::verify<net::bad_request_exception>(trip_id_len_plus_one > 1,
+  utl::verify<net::bad_request_exception>(!ret.trip_id_.empty(),
                                           "invalid tripId id {}", id);
-  ret.trip_id_ =
-      std::string_view{tag.str + tag.length() + 1, trip_id_len_plus_one - 1};
 
   return ret;
 }
