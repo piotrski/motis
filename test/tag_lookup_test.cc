@@ -46,12 +46,14 @@ route_id,agency_id,route_short_name,route_long_name,route_desc,route_type
 S3 ,DB,S3,,,109
 Ü4,DB,U4,,,402
 +ICE_&A,DB,ICE,,,101
+R_1,DB,R1,,,3
 
 # trips.txt
 route_id,service_id,trip_id,trip_headsign,block_id
 S3 ,S1,S3 ,,
 Ü4,S1,Ü4,,
 +ICE_&A,S1,+ICE_&A,,
+R_1,S1,block_316_trip_6_service_4,,
 
 # stop_times.txt
 trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type
@@ -61,6 +63,8 @@ S3 ,01:20:00,01:20:00,FFM_HAUPT_S,2,0,0
 Ü4,01:10:00,01:10:00,+FFM_HÄUPT_&U,1,0,0
 +ICE_&A,00:35:00,00:35:00,DA 10,0,0,0
 +ICE_&A,00:45:00,00:45:00,FFM_10,1,0,0
+block_316_trip_6_service_4,25:27:00,25:27:00,FFM_10,0,0,0
+block_316_trip_6_service_4,25:35:00,25:35:00,FFM_12,1,0,0
 
 # calendar_dates.txt
 service_id,date,exception_type
@@ -86,6 +90,10 @@ TEST(motis, tag_lookup) {
   EXPECT_TRUE(
       d.tags_->get_trip(*d.tt_, rtt, "20190501_01:05_test_Ü4").first.valid());
   EXPECT_TRUE(d.tags_->get_trip(*d.tt_, rtt, "20190501_00:35_test_+ICE_&A")
+                  .first.valid());
+  EXPECT_TRUE(d.tags_->get_trip(
+                    *d.tt_, rtt,
+                    "20190501_25:27_test_block_316_trip_6_service_4")
                   .first.valid());
   EXPECT_NE(nigiri::location_idx_t::invalid(),
             d.tags_->get_location(*d.tt_, "test_DA 10"));
