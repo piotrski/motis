@@ -11,6 +11,16 @@
 using namespace std::string_view_literals;
 using namespace osr;
 
+TEST(motis, split_trip_id_with_underscores) {
+  auto const trip_id = std::string_view{
+      "20260213_25:27_pl-ZTP-Kraków-T_block_316_trip_6_service_4"};
+  auto const parts = motis::split_trip_id(trip_id);
+  EXPECT_EQ(parts.start_date_, "20260213");
+  EXPECT_EQ(parts.start_time_, "25:27");
+  EXPECT_EQ(parts.tag_, "pl-ZTP-Kraków-T");
+  EXPECT_EQ(parts.trip_id_, "block_316_trip_6_service_4");
+}
+
 constexpr auto const kGTFS = R"(
 # agency.txt
 agency_id,agency_name,agency_url,agency_timezone
