@@ -85,6 +85,8 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          cache-from: type=registry,ref=ghcr.io/piotrski/motis:buildcache
+          cache-to: type=registry,ref=ghcr.io/piotrski/motis:buildcache,mode=max
           tags: |
             ghcr.io/piotrski/motis:${{ github.ref_name }}
             ghcr.io/piotrski/motis:${{ github.sha }}
