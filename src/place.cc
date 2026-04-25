@@ -177,8 +177,7 @@ api::Place to_place(n::timetable const* tt,
                 .description_ = get_description(tt_l.scheduled_),
                 .vertexType_ = api::VertexTypeEnum::TRANSIT,
                 .modes_ = std::move(modes)};
-          }
-        }},
+          }},
       l);
 }
 
