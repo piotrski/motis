@@ -458,6 +458,35 @@ api::stoptimes_response stop_times::operator()(
                            static_cast<std::size_t>(max_results), allowed_clasz,
                            query.withScheduledSkippedStops_, window);
 
+  if (events.empty() && query.exactRadius_ && query_stop.has_value() &&
+      query.stopId_.has_value()) {
+    auto const x = *query_stop;
+    auto const l = tt_.locations_.get_root_idx(x);
+    if (x != l) {
+      auto fallback_locations = std::vector{l};
+      utl::concat(fallback_locations, tt_.locations_.children_[l]);
+      for (auto const& c : tt_.locations_.children_[l]) {
+        utl::concat(fallback_locations, tt_.locations_.children_[c]);
+      }
+      utl::erase_duplicates(fallback_locations);
+
+      auto fallback_events = get_events(
+          fallback_locations, tt_, rtt, time, ev_type, dir,
+          static_cast<std::size_t>(query.n_.value_or(0)),
+          static_cast<std::size_t>(max_results), allowed_clasz,
+          query.withScheduledSkippedStops_, window);
+
+      auto filtered_events = std::vector<n::rt::run>{};
+      for (auto const r : fallback_events) {
+        auto const fr = n::rt::frun{tt_, rtt, r};
+        if (tags_.id(tt_, fr[0], ev_type) == *query.stopId_) {
+          filtered_events.emplace_back(r);
+        }
+      }
+      events = std::move(filtered_events);
+    }
+  }
+
   auto const to_tuple = [&](n::rt::run const& x) {
     auto const fr_a = n::rt::frun{tt_, rtt, x};
     return std::tuple{fr_a[0].time(ev_type), fr_a.is_scheduled()
