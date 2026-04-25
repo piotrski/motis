@@ -1,5 +1,6 @@
 #include "motis/endpoints/adr/suggestions_to_response.h"
 
+#include <unordered_set>
 #include <tuple>
 
 #include "utl/for_each_bit_set.h"
@@ -173,14 +174,12 @@ api::geocode_response suggestions_to_response(
         .importance_ = importance};
   });
 
-  utl::sort(response, [](api::Match const& a, api::Match const& b) {
-    return std::tuple{a.id_, -a.score_} < std::tuple{b.id_, -b.score_};
-  });
-  response.erase(std::unique(begin(response), end(response),
-                             [](api::Match const& a, api::Match const& b) {
-                               return a.id_ == b.id_;
-                             }),
-                 end(response));
+  auto seen_ids = std::unordered_set<std::string>{};
+  response.erase(
+      std::remove_if(begin(response), end(response), [&](api::Match const& match) {
+        return !seen_ids.emplace(match.id_).second;
+      }),
+      end(response));
   return response;
 }
 

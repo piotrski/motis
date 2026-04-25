@@ -1,5 +1,6 @@
 #include "motis/canonical_stop_registry.h"
 
+#include <cmath>
 #include <algorithm>
 #include <numeric>
 #include <vector>
@@ -84,7 +85,7 @@ void visit_descendants(n::timetable const& tt,
 }  // namespace
 
 bool canonical_stop_registry::is_null_island(geo::latlng const& pos) {
-  return pos.lat() < 3.0 && pos.lng() < 3.0;
+  return std::abs(pos.lat()) < 3.0 && std::abs(pos.lng()) < 3.0;
 }
 
 canonical_stop_registry::canonical_stop_registry(config::timetable const& config,
