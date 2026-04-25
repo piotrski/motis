@@ -20,6 +20,58 @@ namespace n = nigiri;
 
 namespace motis {
 
+namespace {
+
+template <typename Fn>
+void visit_descendants(n::timetable const& tt,
+                       n::location_idx_t const root,
+                       Fn&& fn) {
+  auto queue = std::vector<n::location_idx_t>{root};
+  for (auto i = std::size_t{0U}; i != queue.size(); ++i) {
+    auto const current = queue[i];
+    fn(current);
+    for (auto const child : tt.locations_.children_[current]) {
+      queue.emplace_back(child);
+    }
+  }
+}
+
+std::optional<std::vector<api::ModeEnum>> resolve_modes(
+    n::timetable const& tt,
+    adr_ext const* ae,
+    n::location_idx_t const l) {
+  if (ae != nullptr) {
+    auto mask = n::routing::clasz_mask_t{0U};
+    if (!ae->location_clasz_.empty()) {
+      mask = ae->location_clasz_.at(l);
+    }
+    auto const root = tt.locations_.get_root_idx(l);
+    if (mask == 0U && root != n::location_idx_t::invalid() &&
+        !ae->location_place_.empty()) {
+      auto const place_idx = ae->location_place_.at(root);
+      if (place_idx != adr_extra_place_idx_t::invalid() &&
+          !ae->place_clasz_.empty()) {
+        mask = ae->place_clasz_.at(place_idx);
+      }
+    }
+    if (mask != 0U) {
+      return to_modes(mask, 5);
+    }
+  }
+
+  auto mask = n::routing::clasz_mask_t{0U};
+  visit_descendants(tt, l, [&](n::location_idx_t const current) {
+    for (auto const route : tt.location_routes_[current]) {
+      mask |= n::routing::to_mask(tt.route_clasz_[route]);
+    }
+  });
+  return mask == 0U ? std::optional<std::vector<api::ModeEnum>>{}
+                    : std::optional<std::vector<api::ModeEnum>>{
+                          to_modes(mask, 5)};
+}
+
+}  // namespace
+
 tt_location::tt_location(nigiri::rt::run_stop const& stop)
     : l_{stop.get_location_idx()},
       scheduled_{stop.get_scheduled_location_idx()} {}
@@ -160,30 +212,8 @@ api::Place to_place(n::timetable const* tt,
                 canonical == nullptr ? tt_l.scheduled_ : canonical->representative_;
             auto const canonical_pos =
                 canonical == nullptr ? pos : canonical->coordinates_;
-            auto const modes = canonical != nullptr
-                                   ? canonical->modes_
-                                   : [&]() {
-                                       if (ae == nullptr) {
-                                         return std::optional<
-                                             std::vector<api::ModeEnum>>{};
-                                       }
-                                       auto mask = n::routing::clasz_mask_t{0U};
-                                       if (!ae->location_clasz_.empty()) {
-                                         mask = ae->location_clasz_.at(l);
-                                       }
-                                       if (mask == 0U &&
-                                           p != n::location_idx_t::invalid()) {
-                                         mask = ae->place_clasz_.at(
-                                             ae->location_place_.at(p));
-                                       }
-                                       if (mask == 0U) {
-                                         return std::optional<
-                                             std::vector<api::ModeEnum>>{};
-                                       }
-                                       return std::optional<
-                                           std::vector<api::ModeEnum>>{
-                                           to_modes(mask, 5)};
-                                     }();
+            auto const modes =
+                canonical != nullptr ? canonical->modes_ : resolve_modes(*tt, ae, l);
 
             return {
                 .name_ = std::string{tt->translate(

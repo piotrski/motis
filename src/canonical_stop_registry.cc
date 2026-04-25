@@ -195,6 +195,10 @@ canonical_stop_registry::canonical_stop_registry(config::timetable const& config
       }
 
       visit_descendants(tt, member_root, [&](n::location_idx_t const l) {
+        if (ae != nullptr && !ae->location_clasz_.empty()) {
+          mode_mask |= ae->location_clasz_.at(l);
+          return;
+        }
         for (auto const route : tt.location_routes_[l]) {
           mode_mask |= n::routing::to_mask(tt.route_clasz_[route]);
         }
