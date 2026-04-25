@@ -145,10 +145,16 @@ api::Place to_place(n::timetable const* tt,
             auto const p = tt->locations_.get_root_idx(l);
             auto const timezone = get_tz(*tt, ae, tz_map, p);
             auto const modes = [&]() {
-              if (ae == nullptr || ae->location_clasz_.empty()) {
+              if (ae == nullptr) {
                 return std::optional<std::vector<api::ModeEnum>>{};
               }
-              auto const mask = ae->location_clasz_.at(l);
+              auto mask = n::routing::clasz_mask_t{0U};
+              if (!ae->location_clasz_.empty()) {
+                mask = ae->location_clasz_.at(l);
+              }
+              if (mask == 0U && p != n::location_idx_t::invalid()) {
+                mask = ae->place_clasz_.at(ae->location_place_.at(p));
+              }
               if (mask == 0U) {
                 return std::optional<std::vector<api::ModeEnum>>{};
               }
