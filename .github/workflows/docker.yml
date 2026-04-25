@@ -45,14 +45,14 @@ jobs:
           cmake -GNinja -S . -B build -DMOTIS_MIMALLOC=OFF
 
       - name: Reset buildcache stats
-        run: ./build/buildcache/bin/buildcache --zero-stats
+        run: buildcache --zero-stats
 
       - name: Build tests
         run: cmake --build build --target motis-test
 
       - name: Show buildcache stats
         if: always()
-        run: ./build/buildcache/bin/buildcache --show-stats
+        run: buildcache --show-stats
 
       - name: Run targeted tests
         run: |
