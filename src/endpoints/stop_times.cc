@@ -492,8 +492,9 @@ api::stoptimes_response stop_times::operator()(
       auto filtered_events = std::vector<n::rt::run>{};
       for (auto const r : fallback_events) {
         auto const fr = n::rt::frun{tt_, rtt, r};
-        auto const place = to_place(&tt_, &tags_, w_, pl_, matches_, ae_, tz_,
-                                    query.language_, fr[0]);
+        auto const place =
+            to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_, matches_,
+                     ae_, tz_, query.language_, fr[0]);
         if (place.stopId_ == query.stopId_) {
           filtered_events.emplace_back(r);
         }
