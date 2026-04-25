@@ -33,8 +33,9 @@ jobs:
       - name: Build tests
         run: cmake --build build --target motis-test
 
-      - name: Run targeted test
-        run: ./build/motis-test --gtest_filter=motis.split_trip_id_with_underscores
+      - name: Run targeted tests
+        run: |
+          ./build/motis-test --gtest_filter='motis.split_trip_id_with_underscores:motis.coalesce_equivalent_stops:motis.stop_group_geocoding:motis.stop_times:motis.trip*'
 
   build-linux-amd64:
     if: github.event_name == 'push'
