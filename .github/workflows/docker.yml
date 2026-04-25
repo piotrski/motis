@@ -21,6 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install toolchain
+        run: |
+          apt-get update
+          apt-get install -y build-essential clang cmake ninja-build
+
       - name: Configure
         run: |
           cmake -GNinja -S . -B build -DMOTIS_MIMALLOC=OFF
@@ -37,6 +42,11 @@ jobs:
     container: ghcr.io/motis-project/docker-cpp-build
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          apt-get update
+          apt-get install -y build-essential clang cmake ninja-build
 
       - name: Configure
         run: cmake --preset linux-amd64-release
