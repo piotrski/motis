@@ -463,6 +463,12 @@ api::stoptimes_response stop_times::operator()(
   auto const rtt = rt->rtt_.get();
   auto const ev_type =
       query.arriveBy_ ? n::event_type::kArr : n::event_type::kDep;
+  auto const normalized_query_stop_id =
+      query_stop.transform([&](n::location_idx_t const l) {
+        return to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
+                        matches_, ae_, tz_, query.language_, tt_location{l})
+            .stopId_;
+      });
   auto const window = query.window_.transform([](auto const w) {
     return std::chrono::duration_cast<n::duration_t>(std::chrono::seconds{w});
   });
@@ -495,7 +501,7 @@ api::stoptimes_response stop_times::operator()(
         auto const place =
             to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_, matches_,
                      ae_, tz_, query.language_, fr[0]);
-        if (place.stopId_ == query.stopId_) {
+        if (place.stopId_ == normalized_query_stop_id.value_or(query.stopId_)) {
           filtered_events.emplace_back(r);
         }
       }
