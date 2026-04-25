@@ -37,9 +37,12 @@ api::stops_response stops::operator()(boost::urls::url_view const& url) const {
     }
     utl::verify<net::too_many_exception>(res.size() < max_results,
                                          "too many items");
+    auto const place_location = canonical_root == n::location_idx_t::invalid()
+                                    ? l
+                                    : canonical_root;
     res.emplace_back(to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
                               matches_, ae_, tz_, query.language_,
-                              tt_location{l}));
+                              tt_location{place_location}));
   });
   return res;
 }
