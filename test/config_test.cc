@@ -48,6 +48,7 @@ timetable:
   adjust_footpaths: true
   merge_dupes_intra_src: false
   merge_dupes_inter_src: false
+  coalesce_equivalent_stops: false
   link_stop_distance: 100
   update_interval: 60
   http_timeout: 30

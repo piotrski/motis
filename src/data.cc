@@ -28,6 +28,7 @@
 
 #include "motis/config.h"
 #include "motis/constants.h"
+#include "motis/canonical_stop_registry.h"
 #include "motis/elevators/update_elevators.h"
 #include "motis/endpoints/initial.h"
 #include "motis/flex/flex_areas.h"
@@ -238,6 +239,12 @@ data::data(std::filesystem::path p, config const& c)
   throw_if_failed("matches", matches);
   throw_if_failed("elevators", elevators);
   throw_if_failed("tiles", tiles);
+
+  if (c.timetable_ != std::nullopt && c.timetable_->coalesce_equivalent_stops_ &&
+      tt_ != nullptr && tags_ != nullptr) {
+    canonical_stop_registry_ = std::make_unique<canonical_stop_registry>(
+        *c.timetable_, *tt_, *tags_, adr_ext_.get(), tz_.get());
+  }
 
   utl_verify(
       shapes_ == nullptr || tt_ == nullptr ||

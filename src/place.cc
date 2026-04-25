@@ -12,6 +12,7 @@
 #include "nigiri/timetable.h"
 
 #include "motis/parse_location.h"
+#include "motis/canonical_stop_registry.h"
 #include "motis/tag_lookup.h"
 #include "motis/timetable/clasz_to_mode.h"
 
@@ -95,6 +96,7 @@ osr::location get_location(n::timetable const* tt,
 
 api::Place to_place(n::timetable const* tt,
                     tag_lookup const* tags,
+                    canonical_stop_registry const* csr,
                     osr::ways const* w,
                     osr::platforms const* pl,
                     platform_matches_t const* matches,
@@ -143,44 +145,76 @@ api::Place to_place(n::timetable const* tt,
 
             auto const pos = tt->locations_.coordinates_[l];
             auto const p = tt->locations_.get_root_idx(l);
-            auto const timezone = get_tz(*tt, ae, tz_map, p);
-            auto const modes = [&]() {
-              if (ae == nullptr) {
-                return std::optional<std::vector<api::ModeEnum>>{};
-              }
-              auto mask = n::routing::clasz_mask_t{0U};
-              if (!ae->location_clasz_.empty()) {
-                mask = ae->location_clasz_.at(l);
-              }
-              if (mask == 0U && p != n::location_idx_t::invalid()) {
-                mask = ae->place_clasz_.at(ae->location_place_.at(p));
-              }
-              if (mask == 0U) {
-                return std::optional<std::vector<api::ModeEnum>>{};
-              }
-              return std::optional<std::vector<api::ModeEnum>>{
-                  to_modes(mask, 5)};
-            }();
+            auto const canonical = csr == nullptr ? nullptr : csr->get(l);
+            auto const timezone =
+                canonical != nullptr
+                    ? canonical->timezone_.transform(
+                          [](std::string const& x) { return x; })
+                    : get_tz(*tt, ae, tz_map, p) == nullptr
+                          ? std::optional<std::string>{}
+                          : std::optional<std::string>{
+                                get_tz(*tt, ae, tz_map, p)->name()};
+            auto const name_root =
+                canonical == nullptr ? p : canonical->representative_;
+            auto const description_root =
+                canonical == nullptr ? tt_l.scheduled_ : canonical->representative_;
+            auto const canonical_pos =
+                canonical == nullptr ? pos : canonical->coordinates_;
+            auto const modes = canonical != nullptr
+                                   ? canonical->modes_
+                                   : [&]() {
+                                       if (ae == nullptr) {
+                                         return std::optional<
+                                             std::vector<api::ModeEnum>>{};
+                                       }
+                                       auto mask = n::routing::clasz_mask_t{0U};
+                                       if (!ae->location_clasz_.empty()) {
+                                         mask = ae->location_clasz_.at(l);
+                                       }
+                                       if (mask == 0U &&
+                                           p != n::location_idx_t::invalid()) {
+                                         mask = ae->place_clasz_.at(
+                                             ae->location_place_.at(p));
+                                       }
+                                       if (mask == 0U) {
+                                         return std::optional<
+                                             std::vector<api::ModeEnum>>{};
+                                       }
+                                       return std::optional<
+                                           std::vector<api::ModeEnum>>{
+                                           to_modes(mask, 5)};
+                                     }();
 
             return {
                 .name_ = std::string{tt->translate(
-                    lang, tt->locations_.names_.at(p))},
-                .stopId_ = tags->id(*tt, l),
-                .parentId_ = p == n::location_idx_t::invalid() || p == l
+                    lang, tt->locations_.names_.at(name_root))},
+                .stopId_ = canonical == nullptr ? tags->id(*tt, l)
+                                                : canonical->stop_id_,
+                .parentId_ = canonical != nullptr
                                  ? std::nullopt
-                                 : std::optional{tags->id(*tt, p)},
-                .importance_ = ae == nullptr
-                                   ? std::nullopt
-                                   : std::optional{ae->place_importance_.at(
-                                         ae->location_place_.at(l))},
-                .lat_ = pos.lat_,
-                .lon_ = pos.lng_,
+                                 : p == n::location_idx_t::invalid() || p == l
+                                       ? std::nullopt
+                                       : std::optional{tags->id(*tt, p)},
+                .importance_ =
+                    canonical != nullptr
+                        ? canonical->importance_
+                        : ae == nullptr
+                              ? std::optional<double>{}
+                              : std::optional<double>{
+                                    ae->place_importance_.at(
+                                        ae->location_place_.at(l))},
+                .lat_ = canonical_pos.lat(),
+                .lon_ = canonical_pos.lng(),
                 .level_ = get_level(w, pl, matches, l),
-                .tz_ = timezone == nullptr ? fallback_tz
-                                           : std::optional{timezone->name()},
+                .tz_ = timezone.or_else([&]() { return fallback_tz; }),
                 .scheduledTrack_ = get_track(tt_l.scheduled_),
                 .track_ = get_track(tt_l.l_),
-                .description_ = get_description(tt_l.scheduled_),
+                .description_ = get_description(description_root)
+                                    .or_else([&]() {
+                                      return canonical == nullptr
+                                                 ? std::optional<std::string>{}
+                                                 : get_description(tt_l.scheduled_);
+                                    }),
                 .vertexType_ = api::VertexTypeEnum::TRANSIT,
                 .modes_ = std::move(modes)};
           }},
@@ -189,6 +223,7 @@ api::Place to_place(n::timetable const* tt,
 
 api::Place to_place(n::timetable const* tt,
                     tag_lookup const* tags,
+                    canonical_stop_registry const* csr,
                     osr::ways const* w,
                     osr::platforms const* pl,
                     platform_matches_t const* matches,
@@ -201,8 +236,8 @@ api::Place to_place(n::timetable const* tt,
   auto const run_cancelled = s.fr_->is_cancelled();
   auto const fallback_tz = s.get_tz_name(
       s.stop_idx_ == 0 ? n::event_type::kDep : n::event_type::kArr);
-  auto p = to_place(tt, tags, w, pl, matches, ae, tz_map, lang, tt_location{s},
-                    start, dest, "", fallback_tz);
+  auto p = to_place(tt, tags, csr, w, pl, matches, ae, tz_map, lang,
+                    tt_location{s}, start, dest, "", fallback_tz);
   p.pickupType_ = !run_cancelled && s.in_allowed()
                       ? api::PickupDropoffTypeEnum::NORMAL
                       : api::PickupDropoffTypeEnum::NOT_ALLOWED;
@@ -217,13 +252,16 @@ api::Place to_place(n::timetable const* tt,
 
 place_t get_place(n::timetable const* tt,
                   tag_lookup const* tags,
+                  canonical_stop_registry const* csr,
                   std::string_view input) {
   if (auto const location = parse_location(input); location.has_value()) {
     return *location;
   }
   utl::verify(tt != nullptr && tags != nullptr,
               R"(could not parse location (no timetable loaded): "{}")", input);
-  return tt_location{tags->get_location(*tt, input)};
+  auto const l = find_stop_location(*tt, *tags, csr, input);
+  utl::verify(l.has_value(), R"(could not parse stop location: "{}")", input);
+  return tt_location{*l};
 }
 
 }  // namespace motis

@@ -24,6 +24,7 @@ struct trip {
   tag_lookup const& tags_;
   point_rtree<nigiri::location_idx_t> const& loc_tree_;
   std::shared_ptr<rt> const& rt_;
+  canonical_stop_registry const* canonical_stop_registry_;
 };
 
 }  // namespace motis::ep

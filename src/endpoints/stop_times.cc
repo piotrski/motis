@@ -19,6 +19,7 @@
 #include "nigiri/timetable.h"
 #include "nigiri/types.h"
 
+#include "motis/canonical_stop_registry.h"
 #include "motis/data.h"
 #include "motis/journey_to_response.h"
 #include "motis/parse_location.h"
@@ -302,6 +303,7 @@ std::vector<api::Place> other_stops_impl(n::rt::frun fr,
                                          n::event_type ev_type,
                                          n::timetable const* tt,
                                          tag_lookup const& tags,
+                                         canonical_stop_registry const* csr,
                                          osr::ways const* w,
                                          osr::platforms const* pl,
                                          platform_matches_t const* matches,
@@ -309,7 +311,7 @@ std::vector<api::Place> other_stops_impl(n::rt::frun fr,
                                          tz_map_t const* tz,
                                          n::lang_t const& lang) {
   auto const convert_stop = [&](n::rt::run_stop const& stop) {
-    auto result = to_place(tt, &tags, w, pl, matches, ae, tz, lang, stop);
+    auto result = to_place(tt, &tags, csr, w, pl, matches, ae, tz, lang, stop);
     if (ev_type == n::event_type::kDep ||
         stop.fr_->stop_range_.from_ != stop.stop_idx_) {
       result.arrival_ = stop.time(n::event_type::kArr);
@@ -371,8 +373,9 @@ api::stoptimes_response stop_times::operator()(
           (query.center_.has_value() && query.radius_.has_value()),
       "no stop and no center with radius (at least one is required)");
 
-  auto const query_stop = query.stopId_.and_then(
-      [&](std::string const& x) { return tags_.find_location(tt_, x); });
+  auto const query_stop = query.stopId_.and_then([&](std::string const& x) {
+    return find_stop_location(tt_, tags_, canonical_stop_registry_, x);
+  });
 
   auto const query_center = query.center_.and_then(
       [&](std::string const& x) { return parse_location(x); });
@@ -410,25 +413,35 @@ api::stoptimes_response stop_times::operator()(
           .count())));
 
   auto locations = std::vector<n::location_idx_t>{};
+  auto const add_descendants = [&](n::location_idx_t const root) {
+    locations.emplace_back(root);
+    utl::concat(locations, tt_.locations_.children_[root]);
+    for (auto const& c : tt_.locations_.children_[root]) {
+      utl::concat(locations, tt_.locations_.children_[c]);
+    }
+  };
   auto const add = [&](n::location_idx_t const l) {
     if (query.exactRadius_) {
       locations.emplace_back(l);
       return;
     }
 
-    auto const l_name = tt_.get_default_translation(tt_.locations_.names_[l]);
-    utl::concat(locations, tt_.locations_.children_[l]);
-    for (auto const& c : tt_.locations_.children_[l]) {
-      utl::concat(locations, tt_.locations_.children_[c]);
+    if (canonical_stop_registry_ != nullptr) {
+      if (auto const canonical = canonical_stop_registry_->get(l);
+          canonical != nullptr) {
+        for (auto const member_root : canonical->members_) {
+          add_descendants(member_root);
+        }
+        return;
+      }
     }
+
+    auto const l_name = tt_.get_default_translation(tt_.locations_.names_[l]);
+    add_descendants(l);
 
     for (auto const eq : tt_.locations_.equivalences_[l]) {
       if (tt_.get_default_translation(tt_.locations_.names_[eq]) == l_name) {
-        locations.emplace_back(eq);
-        utl::concat(locations, tt_.locations_.children_[eq]);
-        for (auto const& c : tt_.locations_.children_[eq]) {
-          utl::concat(locations, tt_.locations_.children_[c]);
-        }
+        add_descendants(eq);
       }
     }
   };
@@ -511,8 +524,8 @@ api::stoptimes_response stop_times::operator()(
             auto const s = fr[0];
             auto const& agency = s.get_provider(ev_type);
             auto const run_cancelled = fr.is_cancelled();
-            auto place = to_place(&tt_, &tags_, w_, pl_, matches_, ae_, tz_,
-                                  query.language_, s);
+            auto place = to_place(&tt_, &tags_, canonical_stop_registry_, w_,
+                                  pl_, matches_, ae_, tz_, query.language_, s);
             if (query.withAlerts_) {
               place.alerts_ =
                   get_alerts(fr,
@@ -548,7 +561,8 @@ api::stoptimes_response stop_times::operator()(
                   !query.fetchStops_.value_or(false)) {
                 return std::nullopt;
               }
-              return other_stops_impl(fr, ev_type, &tt_, tags_, w_, pl_,
+              return other_stops_impl(fr, ev_type, &tt_, tags_,
+                                      canonical_stop_registry_, w_, pl_,
                                       matches_, ae_, tz_, query.language_);
             };
 
@@ -557,10 +571,14 @@ api::stoptimes_response stop_times::operator()(
                 .mode_ = to_mode(s.get_clasz(ev_type), api_version),
                 .realTime_ = r.is_rt(),
                 .headsign_ = std::string{s.direction(lang, ev_type)},
-                .tripFrom_ = to_place(&tt_, &tags_, w_, pl_, matches_, ae_, tz_,
-                                      lang, s.get_first_trip_stop(ev_type)),
-                .tripTo_ = to_place(&tt_, &tags_, w_, pl_, matches_, ae_, tz_,
-                                    lang, s.get_last_trip_stop(ev_type)),
+                .tripFrom_ =
+                    to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
+                             matches_, ae_, tz_, lang,
+                             s.get_first_trip_stop(ev_type)),
+                .tripTo_ =
+                    to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
+                             matches_, ae_, tz_, lang,
+                             s.get_last_trip_stop(ev_type)),
                 .agencyId_ =
                     std::string{tt_.strings_.try_get(agency.id_).value_or("?")},
                 .agencyName_ = std::string{tt_.translate(lang, agency.name_)},
@@ -595,8 +613,8 @@ api::stoptimes_response stop_times::operator()(
       .place_ =
           query_stop
               .transform([&](n::location_idx_t const l) {
-                return to_place(&tt_, &tags_, w_, pl_, matches_, ae_, tz_, lang,
-                                tt_location{l});
+                return to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
+                                matches_, ae_, tz_, lang, tt_location{l});
               })
               .or_else([&]() {
                 return query_center.transform([](osr::location const& loc) {

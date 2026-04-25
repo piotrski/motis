@@ -16,6 +16,7 @@ api::geocode_response suggestions_to_response(
     adr_ext const*,
     nigiri::timetable const*,
     tag_lookup const*,
+    canonical_stop_registry const*,
     osr::ways const* w,
     osr::platforms const* pl,
     platform_matches_t const* matches,

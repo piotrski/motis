@@ -699,10 +699,14 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
   auto const pre_transit_modes = deduplicate(query.preTransitModes_);
   auto const post_transit_modes = deduplicate(query.postTransitModes_);
   auto const direct_modes = deduplicate(query.directModes_);
-  auto const from = get_place(tt_, tags_, query.fromPlace_);
-  auto const to = get_place(tt_, tags_, query.toPlace_);
-  auto from_p = to_place(tt_, tags_, w_, pl_, matches_, ae_, tz_, lang, from);
-  auto to_p = to_place(tt_, tags_, w_, pl_, matches_, ae_, tz_, lang, to);
+  auto const from =
+      get_place(tt_, tags_, canonical_stop_registry_, query.fromPlace_);
+  auto const to =
+      get_place(tt_, tags_, canonical_stop_registry_, query.toPlace_);
+  auto from_p = to_place(tt_, tags_, canonical_stop_registry_, w_, pl_,
+                         matches_, ae_, tz_, lang, from);
+  auto to_p = to_place(tt_, tags_, canonical_stop_registry_, w_, pl_, matches_,
+                       ae_, tz_, lang, to);
   if (from_p.vertexType_ == api::VertexTypeEnum::NORMAL) {
     from_p.name_ = "START";
   }
@@ -1042,8 +1046,9 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
             journeys,
             [&, cache = street_routing_cache_t{}](auto&& j) mutable {
               return journey_to_response(
-                  w_, l_, pl_, *tt_, *tags_, fa_, e, rtt, matches_, elevations_,
-                  shapes_, gbfs_rd, ae_, tz_, j, start, dest, cache,
+                  w_, l_, pl_, *tt_, *tags_, canonical_stop_registry_, fa_, e,
+                  rtt, matches_, elevations_, shapes_, gbfs_rd, ae_, tz_, j,
+                  start, dest, cache,
                   blocked.get(),
                   query.requireCarTransport_ && query.useRoutedTransfers_,
                   osr_params, query.pedestrianProfile_, query.elevationCosts_,
@@ -1064,8 +1069,10 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
   }
 
   return {
-      .from_ = to_place(tt_, tags_, w_, pl_, matches_, ae_, tz_, lang, from),
-      .to_ = to_place(tt_, tags_, w_, pl_, matches_, ae_, tz_, lang, to),
+      .from_ = to_place(tt_, tags_, canonical_stop_registry_, w_, pl_,
+                        matches_, ae_, tz_, lang, from),
+      .to_ = to_place(tt_, tags_, canonical_stop_registry_, w_, pl_, matches_,
+                      ae_, tz_, lang, to),
       .direct_ = std::move(direct),
       .itineraries_ = {}};
 }
