@@ -22,6 +22,20 @@ namespace motis {
 
 namespace {
 
+std::optional<std::string_view> get_default_text(n::timetable const& tt,
+                                                 n::translation_idx_t const idx) {
+  auto const text = tt.get_default_translation(idx);
+  return text.empty() ? std::nullopt : std::optional{text};
+}
+
+bool same_stop_point_signature(std::optional<std::string_view> const& a,
+                               std::optional<std::string_view> const& b) {
+  if (!a.has_value() && !b.has_value()) {
+    return true;
+  }
+  return a.has_value() && b.has_value() && *a == *b;
+}
+
 struct disjoint_set {
   explicit disjoint_set(std::size_t const size) : parent_(size), rank_(size, 0U) {
     std::iota(begin(parent_), end(parent_), 0U);
@@ -89,6 +103,8 @@ canonical_stop_registry::canonical_stop_registry(config::timetable const& config
   auto roots = std::vector<n::location_idx_t>{};
   auto root_to_idx = hash_map<n::location_idx_t, std::size_t>{};
   auto default_name = hash_map<n::location_idx_t, std::string_view>{};
+  auto default_description =
+      hash_map<n::location_idx_t, std::optional<std::string_view>>{};
 
   for (auto i = n::kNSpecialStations; i < tt.n_locations(); ++i) {
     auto const l = n::location_idx_t{i};
@@ -102,6 +118,8 @@ canonical_stop_registry::canonical_stop_registry(config::timetable const& config
     root_to_idx.emplace(l, roots.size());
     roots.emplace_back(l);
     default_name.emplace(l, tt.get_default_translation(tt.locations_.names_[l]));
+    default_description.emplace(
+        l, get_default_text(tt, tt.locations_.descriptions_[l]));
   }
 
   auto dsu = disjoint_set{roots.size()};
@@ -117,7 +135,9 @@ canonical_stop_registry::canonical_stop_registry(config::timetable const& config
       auto const eq_root = tt.locations_.get_root_idx(eq);
       auto const eq_it = root_to_idx.find(eq_root);
       if (eq_it == end(root_to_idx) || root == eq_root ||
-          default_name[root] != default_name[eq_root]) {
+          default_name[root] != default_name[eq_root] ||
+          !same_stop_point_signature(default_description[root],
+                                     default_description[eq_root])) {
         continue;
       }
       dsu.unite(root_it->second, eq_it->second);
