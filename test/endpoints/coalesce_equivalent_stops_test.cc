@@ -27,9 +27,11 @@ agency_id,agency_name,agency_url,agency_timezone
 A,Agency A,https://a.example,Europe/Warsaw
 
 # stops.txt
-stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station
-RM,Rondo Mogilskie,50.067000,19.945000,0,
-TS,Teatr Slowackiego,50.064500,19.941000,0,
+stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,stop_desc
+RM,Rondo Mogilskie,50.067000,19.945000,0,,01
+TS,Teatr Slowackiego,50.064500,19.941000,0,,01
+SP1,Shared Pole,50.066200,19.942200,0,,01
+SP2,Shared Pole,50.066260,19.942260,0,,02
 
 # routes.txt
 route_id,agency_id,route_short_name,route_long_name,route_desc,route_type
@@ -55,9 +57,11 @@ agency_id,agency_name,agency_url,agency_timezone
 M,Agency M,https://m.example,Europe/Warsaw
 
 # stops.txt
-stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station
-RM,Rondo Mogilskie,50.067030,19.945030,0,
-TS,Teatr Slowackiego,50.064530,19.941030,0,
+stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,stop_desc
+RM,Rondo Mogilskie,50.067030,19.945030,0,,01
+TS,Teatr Slowackiego,50.064530,19.941030,0,,01
+SP1,Shared Pole,50.066210,19.942210,0,,01
+SP2,Shared Pole,50.066270,19.942270,0,,02
 
 # routes.txt
 route_id,agency_id,route_short_name,route_long_name,route_desc,route_type
@@ -83,9 +87,11 @@ agency_id,agency_name,agency_url,agency_timezone
 T,Agency T,https://t.example,Europe/Warsaw
 
 # stops.txt
-stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station
-RM,Rondo Mogilskie,50.067020,19.945020,0,
-TS,Teatr Slowackiego,50.064520,19.941020,0,
+stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,stop_desc
+RM,Rondo Mogilskie,50.067020,19.945020,0,,01
+TS,Teatr Slowackiego,50.064520,19.941020,0,,01
+SP1,Shared Pole,50.066220,19.942220,0,,01
+SP2,Shared Pole,50.066280,19.942280,0,,02
 
 # routes.txt
 route_id,agency_id,route_short_name,route_long_name,route_desc,route_type
@@ -147,13 +153,15 @@ TEST(motis, coalesce_equivalent_stops) {
       "/api/v1/map/stops?min=50.0600,19.9390&max=50.0700,19.9470";
   auto const map_off = stops_off(map_query);
   auto const map_on = stops_on(map_query);
-  EXPECT_EQ(6, map_off.size());
-  EXPECT_EQ(2, map_on.size());
+  EXPECT_EQ(12, map_off.size());
+  EXPECT_EQ(4, map_on.size());
 
   auto const stop_ids_on =
       utl::to_vec(map_on, [](api::Place const& p) { return *p.stopId_; });
   EXPECT_NE(end(stop_ids_on), utl::find(stop_ids_on, "a_RM"));
   EXPECT_NE(end(stop_ids_on), utl::find(stop_ids_on, "a_TS"));
+  EXPECT_NE(end(stop_ids_on), utl::find(stop_ids_on, "a_SP1"));
+  EXPECT_NE(end(stop_ids_on), utl::find(stop_ids_on, "a_SP2"));
 
   auto const stop_times_off_res =
       stop_times_off("/api/v5/stoptimes?stopId=m_RM&time=2020-01-01T08:55:00.000Z"
