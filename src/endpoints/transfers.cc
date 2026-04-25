@@ -30,8 +30,14 @@ api::transfers_response transfers::operator()(
   auto const q = motis::api::transfers_params{url.params()};
   auto const rt = std::atomic_load(&rt_);
   auto const e = rt->e_.get();
-  auto const l = find_stop_location(tt_, tags_, canonical_stop_registry_, q.id_)
-                     .value_or(tags_.get_location(tt_, q.id_));
+  auto const l = [&]() {
+    if (auto const resolved =
+            find_stop_location(tt_, tags_, canonical_stop_registry_, q.id_);
+        resolved.has_value()) {
+      return *resolved;
+    }
+    return tags_.get_location(tt_, q.id_);
+  }();
 
   auto const neighbors =
       loc_rtree_.in_radius(tt_.locations_.coordinates_[l], kMaxDistance);
