@@ -24,6 +24,7 @@ struct one_to_all {
   platform_matches_t const* matches_;
   adr_ext const* ae_;
   tz_map_t const* tz_;
+  canonical_stop_registry const* canonical_stop_registry_;
   way_matches_storage const* way_matches_;
   std::shared_ptr<gbfs::gbfs_data> const& gbfs_;
   metrics_registry* metrics_;

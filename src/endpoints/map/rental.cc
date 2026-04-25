@@ -34,7 +34,7 @@ api::rentals_response rental::operator()(
     return parse_location(sv);
   };
   auto const parse_place_pos = [&](std::string_view const sv) {
-    auto const place = get_place(tt_, tags_, sv);
+    auto const place = get_place(tt_, tags_, nullptr, sv);
     return std::visit(
         utl::overloaded{[&](osr::location const& l) { return l.pos_; },
                         [&](tt_location const tt_l) {

@@ -19,6 +19,7 @@ struct geocode {
   adr::formatter const& f_;
   adr::cache& cache_;
   adr_ext const* ae_;
+  canonical_stop_registry const* canonical_stop_registry_;
 };
 
 }  // namespace motis::ep

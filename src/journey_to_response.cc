@@ -241,6 +241,7 @@ api::Itinerary journey_to_response(
     osr::platforms const* pl,
     n::timetable const& tt,
     tag_lookup const& tags,
+    canonical_stop_registry const* csr,
     flex::flex_areas const* fl,
     elevators const* e,
     n::rt_timetable const* rtt,
@@ -413,19 +414,19 @@ api::Itinerary journey_to_response(
         pred == nullptr ? get_first_run_tz() : pred->to_.tz_;
     auto const from =
         pred == nullptr
-            ? to_place(&tt, &tags, w, pl, matches, ae, tz_map, lang,
+            ? to_place(&tt, &tags, csr, w, pl, matches, ae, tz_map, lang,
                        tt_location{j_leg.from_}, start, dest, "", fallback_tz)
             : pred->to_;
     auto const to =
-        to_place(&tt, &tags, w, pl, matches, ae, tz_map, lang,
+        to_place(&tt, &tags, csr, w, pl, matches, ae, tz_map, lang,
                  tt_location{j_leg.to_}, start, dest, "", fallback_tz);
 
     auto is_unique =
         unique_stop_map_t{0U, parent_name_hash{&tt}, parent_name_eq{&tt}};
     auto const to_place = [&](n::rt::run_stop const& s,
                               n::event_type const ev_type) {
-      auto p = ::motis::to_place(&tt, &tags, w, pl, matches, ae, tz_map, lang,
-                                 s, start, dest);
+      auto p = ::motis::to_place(&tt, &tags, csr, w, pl, matches, ae, tz_map,
+                                 lang, s, start, dest);
       p.alerts_ = get_alerts(*s.fr_, std::pair{s, ev_type}, false, lang);
       if (auto const it = is_unique.find(s.get_location_idx());
           it != end(is_unique) && !it->second) {

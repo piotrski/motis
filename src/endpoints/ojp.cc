@@ -444,8 +444,8 @@ void add_place(auto const& t,
 
   if (p.parentId_.has_value() && p.parentId_ != p.stopId_) {
     add_place(t, already_added, language, lang, places_node,
-              to_place(maybe_ref(t.tt_), maybe_ref(t.tags_), t.w_, t.pl_,
-                       t.matches_, t.ae_, t.tz_, lang,
+              to_place(maybe_ref(t.tt_), maybe_ref(t.tags_), nullptr, t.w_,
+                       t.pl_, t.matches_, t.ae_, t.tz_, lang,
                        tt_location{maybe_deref(t.tags_).get_location(
                            maybe_deref(t.tt_), *p.parentId_)}));
   }

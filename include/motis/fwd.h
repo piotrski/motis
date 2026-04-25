@@ -55,6 +55,7 @@ struct metrics_registry;
 struct way_matches_storage;
 struct data;
 struct adr_ext;
+struct canonical_stop_registry;
 
 namespace odm {
 struct bounds;
