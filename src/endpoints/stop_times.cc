@@ -472,14 +472,16 @@ api::stoptimes_response stop_times::operator()(
 
       auto fallback_events = get_events(
           fallback_locations, tt_, rtt, time, ev_type, dir,
-          static_cast<std::size_t>(query.n_.value_or(0)),
+          static_cast<std::size_t>(max_results),
           static_cast<std::size_t>(max_results), allowed_clasz,
           query.withScheduledSkippedStops_, window);
 
       auto filtered_events = std::vector<n::rt::run>{};
       for (auto const r : fallback_events) {
         auto const fr = n::rt::frun{tt_, rtt, r};
-        if (tags_.id(tt_, fr[0], ev_type) == *query.stopId_) {
+        auto const place = to_place(&tt_, &tags_, w_, pl_, matches_, ae_, tz_,
+                                    query.language_, fr[0]);
+        if (place.stopId_ == query.stopId_) {
           filtered_events.emplace_back(r);
         }
       }
