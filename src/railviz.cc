@@ -448,6 +448,7 @@ Response build_routes_response(
     osr::ways const* w,
     osr::platforms const* pl,
     platform_matches_t const* matches,
+    canonical_stop_registry const* csr,
     std::vector<n::route_idx_t> const& route_indexes,
     std::optional<geo::box> const& area,
     std::optional<std::vector<std::string>> const& language) {
@@ -460,28 +461,25 @@ Response build_routes_response(
     }
   };
 
-  auto stop_indexes = std::vector<std::int64_t>{};
-  stop_indexes.resize(tt.locations_.coordinates_.size(), -1);
+  auto stop_indexes = hash_map<n::location_idx_t, std::int64_t>{};
   auto const get_stop_index = [&](n::rt::run_stop const& stop) {
     auto const l = stop.get_location_idx();
-    auto& stop_index = stop_indexes[to_idx(l)];
-    if (stop_index == -1) {
-      auto const parent = tt.locations_.get_root_idx(l);
-      auto const root = tt.locations_.get_root_idx(l);
-      auto const pos = tt.locations_.coordinates_.at(l);
-      stop_index = static_cast<std::int64_t>(res.stops_.size());
-      res.stops_.emplace_back(
-          api::Place{.name_ = std::string{tt.translate(
-                         language, tt.locations_.names_.at(root))},
-                     .stopId_ = tags.id(tt, l),
-                     .parentId_ = parent == n::location_idx_t::invalid()
-                                      ? std::nullopt
-                                      : std::optional{tags.id(tt, parent)},
-                     .lat_ = pos.lat_,
-                     .lon_ = pos.lng_,
-                     .level_ = get_lvl(w, pl, matches, l).to_float()});
+    auto const canonical_root =
+        csr == nullptr ? n::location_idx_t::invalid() : csr->canonical_root(l);
+    auto const key = canonical_root == n::location_idx_t::invalid() ? l
+                                                                    : canonical_root;
+    auto const it = stop_indexes.find(key);
+    if (it == end(stop_indexes)) {
+      auto const place =
+          to_place(&tt, &tags, csr, w, pl, matches, nullptr, nullptr, language,
+                   tt_location{key});
+      auto const stop_index = static_cast<std::int64_t>(res.stops_.size());
+      stop_indexes.emplace(key, stop_index);
+      res.stops_.emplace_back(std::move(place));
+      return stop_index;
+    } else {
+      return it->second;
     }
-    return stop_index;
   };
 
   auto polyline_indexes = hash_map<std::string, std::int64_t>{};
@@ -639,6 +637,7 @@ api::routes_response get_routes(tag_lookup const& tags,
                                 osr::platforms const* pl,
                                 platform_matches_t const* matches,
                                 adr_ext const*,
+                                canonical_stop_registry const* csr,
                                 tz_map_t const*,
                                 railviz_static_index::impl const& static_index,
                                 railviz_rt_index::impl const&,
@@ -672,7 +671,8 @@ api::routes_response get_routes(tag_lookup const& tags,
   }
 
   auto res = build_routes_response<api::routes_response>(
-      tags, tt, shapes, w, pl, matches, route_indexes, area, query.language_);
+      tags, tt, shapes, w, pl, matches, csr, route_indexes, area,
+      query.language_);
   res.zoomFiltered_ = zoom_filtered;
   return res;
 }
@@ -686,6 +686,7 @@ api::routeDetails_response get_route_details(
     osr::platforms const* pl,
     platform_matches_t const* matches,
     adr_ext const*,
+    canonical_stop_registry const* csr,
     tz_map_t const*,
     railviz_static_index::impl const&,
     railviz_rt_index::impl const&,
@@ -700,7 +701,8 @@ api::routeDetails_response get_route_details(
       n::route_idx_t{static_cast<n::route_idx_t::value_t>(query.routeIdx_)};
 
   auto res = build_routes_response<api::routeDetails_response>(
-      tags, tt, shapes, w, pl, matches, {route}, std::nullopt, query.language_);
+      tags, tt, shapes, w, pl, matches, csr, {route}, std::nullopt,
+      query.language_);
   res.zoomFiltered_ = false;
   return res;
 }
