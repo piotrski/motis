@@ -191,4 +191,19 @@ TEST(motis, stop_times) {
       EXPECT_FALSE(stopTime.place_.alerts_.has_value());
     }
   }
+
+  {
+    auto const exact_platform = stop_times(
+        "/api/v5/stoptimes?stopId=test_FFM_12"
+        "&time=2019-04-30T23:30:00.000Z"
+        "&arriveBy=true"
+        "&n=3"
+        "&radius=0"
+        "&exactRadius=true");
+
+    ASSERT_EQ("test_FFM_12", exact_platform.place_.stopId_);
+    ASSERT_EQ(1, exact_platform.stopTimes_.size());
+    EXPECT_EQ("test_FFM_12", exact_platform.stopTimes_[0].place_.stopId_);
+    EXPECT_EQ("20190501_00:35_test_ICE", exact_platform.stopTimes_[0].tripId_);
+  }
 }
