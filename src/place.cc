@@ -4,6 +4,8 @@
 
 #include "utl/verify.h"
 
+#include "net/not_found_exception.h"
+
 #include "osr/location.h"
 #include "osr/platforms.h"
 
@@ -290,7 +292,9 @@ place_t get_place(n::timetable const* tt,
   utl::verify(tt != nullptr && tags != nullptr,
               R"(could not parse location (no timetable loaded): "{}")", input);
   auto const l = find_stop_location(*tt, *tags, csr, input);
-  utl::verify(l.has_value(), R"(could not parse stop location: "{}")", input);
+  utl::verify<net::not_found_exception>(l.has_value(),
+                                        R"(could not parse stop location: "{}")",
+                                        input);
   return tt_location{*l};
 }
 
