@@ -25,11 +25,24 @@ api::stops_response stops::operator()(boost::urls::url_view const& url) const {
   auto res = api::stops_response{};
 
   auto const max_results = config_.get_limits().stops_max_results_;
+  auto seen = hash_set<n::location_idx_t>{};
   loc_rtree_.find({min->pos_, max->pos_}, [&](n::location_idx_t const l) {
+    auto const canonical_root =
+        canonical_stop_registry_ == nullptr
+            ? n::location_idx_t::invalid()
+            : canonical_stop_registry_->canonical_root(l);
+    if (canonical_root != n::location_idx_t::invalid() &&
+        !seen.emplace(canonical_root).second) {
+      return;
+    }
     utl::verify<net::too_many_exception>(res.size() < max_results,
                                          "too many items");
-    res.emplace_back(to_place(&tt_, &tags_, w_, pl_, matches_, ae_, tz_,
-                              query.language_, tt_location{l}));
+    auto const place_location = canonical_root == n::location_idx_t::invalid()
+                                    ? l
+                                    : canonical_root;
+    res.emplace_back(to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
+                              matches_, ae_, tz_, query.language_,
+                              tt_location{place_location}));
   });
   return res;
 }

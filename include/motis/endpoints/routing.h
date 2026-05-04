@@ -129,6 +129,7 @@ struct routing {
   std::shared_ptr<gbfs::gbfs_data> const& gbfs_;
   adr_ext const* ae_;
   tz_map_t const* tz_;
+  canonical_stop_registry const* canonical_stop_registry_;
   odm::bounds const* odm_bounds_;
   odm::ride_sharing_bounds const* ride_sharing_bounds_;
   metrics_registry* metrics_;

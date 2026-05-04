@@ -53,7 +53,8 @@ api::Reachable one_to_all::operator()(boost::urls::url_view const& url) const {
 
   auto const make_place = [&](place_t const& p, n::unixtime_t const t,
                               n::event_type const ev) {
-    auto place = to_place(&tt_, &tags_, w_, pl_, matches_, ae_, tz_, {}, p);
+    auto place = to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
+                          matches_, ae_, tz_, {}, p);
     if (ev == n::event_type::kArr) {
       place.arrival_ = t;
     } else {
@@ -65,7 +66,8 @@ api::Reachable one_to_all::operator()(boost::urls::url_view const& url) const {
   auto const time = std::chrono::time_point_cast<std::chrono::minutes>(
       *query.time_.value_or(openapi::now()));
   auto const max_travel_time = n::duration_t{query.maxTravelTime_};
-  auto const one = get_place(&tt_, &tags_, query.one_);
+  auto const one =
+      get_place(&tt_, &tags_, canonical_stop_registry_, query.one_);
   auto const one_modes = deduplicate(query.arriveBy_ ? query.postTransitModes_
                                                      : query.preTransitModes_);
   auto const one_max_time = std::min(
@@ -82,7 +84,8 @@ api::Reachable one_to_all::operator()(boost::urls::url_view const& url) const {
   auto const r = routing{
       config_, w_,        l_,      pl_,      elevations_,  &tt_,    nullptr,
       &tags_,  loc_tree_, fa_,     matches_, way_matches_, rt_,     nullptr,
-      gbfs_,   nullptr,   nullptr, nullptr,  nullptr,      metrics_};
+      gbfs_,   nullptr,   nullptr, canonical_stop_registry_, nullptr, nullptr,
+      metrics_};
   auto gbfs_rd = gbfs::gbfs_routing_data{w_, l_, gbfs_};
 
   auto const osr_params = get_osr_parameters(query);

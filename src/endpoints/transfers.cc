@@ -1,18 +1,23 @@
 #include "motis/endpoints/transfers.h"
 
+#include <algorithm>
+
 #include "osr/geojson.h"
 #include "osr/routing/route.h"
 
+#include "utl/helpers/algorithm.h"
 #include "utl/pipes/all.h"
 #include "utl/pipes/transform.h"
 #include "utl/pipes/vec.h"
 
 #include "motis/constants.h"
+#include "motis/canonical_stop_registry.h"
 #include "motis/elevators/elevators.h"
 #include "motis/elevators/match_elevator.h"
 #include "motis/get_loc.h"
 #include "motis/match_platforms.h"
 #include "motis/osr/parameters.h"
+#include "motis/place.h"
 #include "motis/tag_lookup.h"
 
 namespace json = boost::json;
@@ -25,7 +30,14 @@ api::transfers_response transfers::operator()(
   auto const q = motis::api::transfers_params{url.params()};
   auto const rt = std::atomic_load(&rt_);
   auto const e = rt->e_.get();
-  auto const l = tags_.get_location(tt_, q.id_);
+  auto const l = [&]() {
+    if (auto const resolved =
+            find_stop_location(tt_, tags_, canonical_stop_registry_, q.id_);
+        resolved.has_value()) {
+      return *resolved;
+    }
+    return tags_.get_location(tt_, q.id_);
+  }();
 
   auto const neighbors =
       loc_rtree_.in_radius(tt_.locations_.coordinates_[l], kMaxDistance);
@@ -84,21 +96,28 @@ api::transfers_response transfers::operator()(
   }
 
   auto const to_place = [&](n::location_idx_t const l) -> api::Place {
-    return {
-        .name_ =
-            std::string{tt_.get_default_translation(tt_.locations_.names_[l])},
-        .stopId_ = std::string{tt_.locations_.ids_[l].view()},
-        .lat_ = tt_.locations_.coordinates_[l].lat(),
-        .lon_ = tt_.locations_.coordinates_[l].lng(),
-        .level_ = pl_.get_level(w_, matches_[l]).to_float(),
-        .vertexType_ = api::VertexTypeEnum::NORMAL};
+    return ::motis::to_place(&tt_, &tags_, canonical_stop_registry_, &w_, &pl_,
+                             &matches_, nullptr, nullptr, {}, tt_location{l});
+  };
+
+  auto const dedupe_places = [&](std::vector<api::Place> places) {
+    utl::sort(places, [](api::Place const& a, api::Place const& b) {
+      return a.stopId_.value_or("") < b.stopId_.value_or("");
+    });
+    places.erase(
+        std::unique(begin(places), end(places), [](api::Place const& a,
+                                                   api::Place const& b) {
+          return a.stopId_ == b.stopId_;
+        }),
+        end(places));
+    return places;
   };
 
   return {.place_ = to_place(l),
           .root_ = to_place(tt_.locations_.get_root_idx(l)),
-          .equivalences_ = utl::to_vec(
+          .equivalences_ = dedupe_places(utl::to_vec(
               tt_.locations_.equivalences_[l],
-              [&](n::location_idx_t const eq) { return to_place(eq); }),
+              [&](n::location_idx_t const eq) { return to_place(eq); })),
           .hasFootTransfers_ =
               !tt_.locations_.footpaths_out_[n::kFootProfile].empty(),
           .hasWheelchairTransfers_ =

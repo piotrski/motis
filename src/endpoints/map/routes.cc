@@ -13,7 +13,8 @@ api::routes_response routes::operator()(
   auto const api_version = get_api_version(url);
   auto const rt = rt_;
   return get_routes(tags_, tt_, rt->rtt_.get(), shapes_, w_, pl_, matches_, ae_,
-                    tz_, *static_.impl_, *rt->railviz_rt_->impl_,
+                    canonical_stop_registry_, tz_, *static_.impl_,
+                    *rt->railviz_rt_->impl_,
                     api::routes_params{url.params()}, api_version);
 }
 

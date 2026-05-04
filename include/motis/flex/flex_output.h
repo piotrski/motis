@@ -19,6 +19,7 @@ struct flex_output : public output {
               osr::platforms const*,
               platform_matches_t const*,
               adr_ext const*,
+              canonical_stop_registry const*,
               tz_map_t const*,
               tag_lookup const&,
               nigiri::timetable const&,
@@ -47,6 +48,7 @@ private:
   osr::platforms const* pl_;
   platform_matches_t const* matches_;
   adr_ext const* ae_;
+  canonical_stop_registry const* csr_;
   tz_map_t const* tz_;
   nigiri::timetable const& tt_;
   tag_lookup const& tags_;

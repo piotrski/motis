@@ -39,6 +39,7 @@ api::Itinerary journey_to_response(
     osr::platforms const*,
     nigiri::timetable const&,
     tag_lookup const&,
+    canonical_stop_registry const*,
     flex::flex_areas const*,
     elevators const* e,
     nigiri::rt_timetable const*,

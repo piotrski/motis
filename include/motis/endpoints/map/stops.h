@@ -23,6 +23,7 @@ struct stops {
   point_rtree<nigiri::location_idx_t> const& loc_rtree_;
   tag_lookup const& tags_;
   nigiri::timetable const& tt_;
+  canonical_stop_registry const* canonical_stop_registry_;
 };
 
 }  // namespace motis::ep

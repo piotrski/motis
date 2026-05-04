@@ -127,6 +127,7 @@ struct config {
     bool adjust_footpaths_{true};
     bool merge_dupes_intra_src_{false};
     bool merge_dupes_inter_src_{false};
+    bool coalesce_equivalent_stops_{false};
     unsigned link_stop_distance_{100U};
     unsigned update_interval_{60};
     unsigned http_timeout_{30};

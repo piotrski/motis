@@ -42,6 +42,7 @@ api::Place to_place(osr::location,
 api::Place to_place(
     nigiri::timetable const*,
     tag_lookup const*,
+    canonical_stop_registry const*,
     osr::ways const*,
     osr::platforms const*,
     platform_matches_t const*,
@@ -56,6 +57,7 @@ api::Place to_place(
 
 api::Place to_place(nigiri::timetable const*,
                     tag_lookup const*,
+                    canonical_stop_registry const*,
                     osr::ways const*,
                     osr::platforms const*,
                     platform_matches_t const*,
@@ -78,6 +80,7 @@ osr::location get_location(nigiri::timetable const*,
 
 place_t get_place(nigiri::timetable const*,
                   tag_lookup const*,
+                  canonical_stop_registry const*,
                   std::string_view user_input);
 
 }  // namespace motis
