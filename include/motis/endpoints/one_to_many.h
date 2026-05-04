@@ -109,6 +109,7 @@ struct one_to_many_intermodal {
   way_matches_storage const* way_matches_;
   std::shared_ptr<gbfs::gbfs_data> const& gbfs_;
   metrics_registry* metrics_;
+  canonical_stop_registry const* canonical_stop_registry_;
 };
 
 }  // namespace motis::ep

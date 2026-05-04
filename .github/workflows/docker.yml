@@ -9,6 +9,10 @@ on:
       - patches
   workflow_dispatch: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
@@ -18,18 +22,41 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     container: ghcr.io/motis-project/docker-cpp-build
+    env:
+      BUILDCACHE_DIR: /github/home/.buildcache
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore buildcache
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.buildcache
+          key: ${{ runner.os }}-buildcache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'deps/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-buildcache-
+
+      - name: Install toolchain
+        run: |
+          apt-get update
+          apt-get install -y build-essential clang cmake ninja-build
 
       - name: Configure
         run: |
           cmake -GNinja -S . -B build -DMOTIS_MIMALLOC=OFF
 
+      - name: Reset buildcache stats
+        run: buildcache --zero-stats
+
       - name: Build tests
         run: cmake --build build --target motis-test
 
-      - name: Run targeted test
-        run: ./build/motis-test --gtest_filter=motis.split_trip_id_with_underscores
+      - name: Show buildcache stats
+        if: always()
+        run: buildcache --show-stats
+
+      - name: Run targeted tests
+        run: |
+          ./build/motis-test --gtest_filter='motis.split_trip_id_with_underscores:motis.coalesce_equivalent_stops:motis.stop_group_geocoding:motis.stop_times:motis.trip*'
 
   build-linux-amd64:
     if: github.event_name == 'push'
@@ -37,6 +64,11 @@ jobs:
     container: ghcr.io/motis-project/docker-cpp-build
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          apt-get update
+          apt-get install -y build-essential clang cmake ninja-build
 
       - name: Configure
         run: cmake --preset linux-amd64-release

@@ -1,5 +1,8 @@
 #include "motis/endpoints/adr/suggestions_to_response.h"
 
+#include <unordered_set>
+#include <tuple>
+
 #include "utl/for_each_bit_set.h"
 #include "utl/helpers/algorithm.h"
 #include "utl/overloaded.h"
@@ -10,6 +13,7 @@
 
 #include "adr/typeahead.h"
 
+#include "motis/canonical_stop_registry.h"
 #include "motis/journey_to_response.h"
 #include "motis/tag_lookup.h"
 #include "motis/timetable/clasz_to_mode.h"
@@ -38,13 +42,14 @@ api::geocode_response suggestions_to_response(
     adr_ext const* ae,
     n::timetable const* tt,
     tag_lookup const* tags,
+    canonical_stop_registry const* csr,
     osr::ways const* w,
     osr::platforms const* pl,
     platform_matches_t const* matches,
     basic_string<a::language_idx_t> const& lang_indices,
     std::vector<adr::token> const& token_pos,
     std::vector<adr::suggestion> const& suggestions) {
-  return utl::to_vec(suggestions, [&](a::suggestion const& s) {
+  auto response = utl::to_vec(suggestions, [&](a::suggestion const& s) {
     auto const areas = t.area_sets_[s.area_set_];
     auto modes = std::optional<std::vector<api::ModeEnum>>{};
     auto importance = std::optional<double>{};
@@ -61,16 +66,21 @@ api::geocode_response suggestions_to_response(
                      ? api::LocationTypeEnum::STOP
                      : api::LocationTypeEnum::PLACE;
           if (type == api::LocationTypeEnum::STOP) {
+            auto const l = n::location_idx_t{
+                static_cast<n::location_idx_t::value_t>(s.get_osm_id(t))};
             if (tt != nullptr && tags != nullptr) {
-              auto const l = n::location_idx_t{
-                  static_cast<n::location_idx_t::value_t>(s.get_osm_id(t))};
+              auto const canonical = csr == nullptr ? nullptr : csr->get(l);
               level = get_level(w, pl, matches, l);
-              id = tags->id(*tt, l);
+              id = canonical == nullptr ? tags->id(*tt, l) : canonical->stop_id_;
+              if (canonical != nullptr) {
+                modes = canonical->modes_;
+                importance = canonical->importance_;
+              }
             } else {
               id = fmt::format("stop/{}", p);
             }
 
-            if (ae != nullptr) {
+            if (ae != nullptr && (csr == nullptr || !csr->is_coalesced(l))) {
               auto const i = adr_extra_place_idx_t{
                   static_cast<adr_extra_place_idx_t::value_t>(p -
                                                               t.ext_start_)};
@@ -163,6 +173,14 @@ api::geocode_response suggestions_to_response(
         .modes_ = std::move(modes),
         .importance_ = importance};
   });
+
+  auto seen_ids = std::unordered_set<std::string>{};
+  response.erase(
+      std::remove_if(begin(response), end(response), [&](api::Match const& match) {
+        return !seen_ids.emplace(match.id_).second;
+      }),
+      end(response));
+  return response;
 }
 
 }  // namespace motis

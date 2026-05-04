@@ -40,6 +40,7 @@ flex_output::flex_output(osr::ways const& w,
                          osr::platforms const* pl,
                          platform_matches_t const* matches,
                          adr_ext const* ae,
+                         canonical_stop_registry const* csr,
                          tz_map_t const* tz,
                          tag_lookup const& tags,
                          n::timetable const& tt,
@@ -49,6 +50,7 @@ flex_output::flex_output(osr::ways const& w,
       pl_{pl},
       matches_{matches},
       ae_{ae},
+      csr_{csr},
       tz_{tz},
       tt_{tt},
       tags_{tags},
@@ -114,7 +116,7 @@ void flex_output::annotate_leg(n::lang_t const& lang,
   auto const write_node_info = [&](api::Place& p, osr::node_idx_t const n) {
     if (w_.is_additional_node(n)) {
       auto const l = flex_routing_data_.get_additional_node(n);
-      p = to_place(&tt_, &tags_, &w_, pl_, matches_, ae_, tz_, lang,
+      p = to_place(&tt_, &tags_, csr_, &w_, pl_, matches_, ae_, tz_, lang,
                    tt_location{l});
     }
   };
@@ -149,13 +151,8 @@ api::Place flex_output::get_place(n::lang_t const& lang,
                                   std::optional<std::string> const& tz) const {
   if (w_.is_additional_node(n)) {
     auto const l = flex_routing_data_.get_additional_node(n);
-    auto const c = tt_.locations_.coordinates_.at(l);
-    return api::Place{
-        .name_ = std::string{tt_.translate(lang, tt_.locations_.names_.at(l))},
-        .lat_ = c.lat_,
-        .lon_ = c.lng_,
-        .tz_ = tz,
-        .vertexType_ = api::VertexTypeEnum::TRANSIT};
+    return to_place(&tt_, &tags_, csr_, &w_, pl_, matches_, ae_, tz_, lang,
+                    tt_location{l}, osr::location{}, osr::location{}, "", tz);
   } else {
     auto const pos = w_.get_node_pos(n).as_latlng();
     return api::Place{.lat_ = pos.lat_,
