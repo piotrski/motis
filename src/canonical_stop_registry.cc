@@ -106,6 +106,8 @@ canonical_stop_registry::canonical_stop_registry(config::timetable const& config
   auto default_name = hash_map<n::location_idx_t, std::string_view>{};
   auto default_description =
       hash_map<n::location_idx_t, std::optional<std::string_view>>{};
+  auto default_platform_code =
+      hash_map<n::location_idx_t, std::optional<std::string_view>>{};
 
   for (auto i = n::kNSpecialStations; i < tt.n_locations(); ++i) {
     auto const l = n::location_idx_t{i};
@@ -121,6 +123,8 @@ canonical_stop_registry::canonical_stop_registry(config::timetable const& config
     default_name.emplace(l, tt.get_default_translation(tt.locations_.names_[l]));
     default_description.emplace(
         l, get_default_text(tt, tt.locations_.descriptions_[l]));
+    default_platform_code.emplace(
+        l, get_default_text(tt, tt.locations_.platform_codes_[l]));
   }
 
   auto dsu = disjoint_set{roots.size()};
@@ -138,7 +142,10 @@ canonical_stop_registry::canonical_stop_registry(config::timetable const& config
       if (eq_it == end(root_to_idx) || root == eq_root ||
           default_name[root] != default_name[eq_root] ||
           !same_stop_point_signature(default_description[root],
-                                     default_description[eq_root])) {
+                                     default_description[eq_root]) ||
+          !default_platform_code[root].has_value() ||
+          !default_platform_code[eq_root].has_value() ||
+          default_platform_code[root] != default_platform_code[eq_root]) {
         continue;
       }
       dsu.unite(root_it->second, eq_it->second);
