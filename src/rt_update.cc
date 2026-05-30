@@ -19,6 +19,7 @@
 #include "motis/config.h"
 #include "motis/data.h"
 #include "motis/elevators/update_elevators.h"
+#include "motis/gtfsrt_trip_id_rewriter.h"
 #include "motis/http_req.h"
 #include "motis/railviz.h"
 #include "motis/rt/auser.h"
@@ -211,7 +212,21 @@ void run_rt_update(boost::asio::io_context& ioc, config const& c, data& d) {
                                           boost::urls::url{g.ep_.url_},
                                           g.ep_.headers_.value_or(headers_t{}),
                                           timeout);
-                                      auto const body = get_http_body(res);
+                                      auto body = get_http_body(res);
+                                      if (g.tag_ == "pl-Warszawa") {
+                                        auto feed =
+                                            transit_realtime::FeedMessage{};
+                                        if (feed.ParseFromString(body)) {
+                                          auto const lookup =
+                                              build_gtfsrt_trip_id_lookup(
+                                                  *d.tt_, *d.tags_, *rtt,
+                                                  g.tag_);
+                                          if (rewrite_gtfsrt_trip_ids(
+                                                  feed, lookup)) {
+                                            body = feed.SerializeAsString();
+                                          }
+                                        }
+                                      }
                                       if (dump_rt) {
                                         std::ofstream{get_dump_path(g)}.write(
                                             body.c_str(),
