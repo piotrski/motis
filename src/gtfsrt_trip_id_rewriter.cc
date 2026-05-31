@@ -75,14 +75,14 @@ gtfsrt_trip_id_lookup_t build_gtfsrt_trip_id_lookup(
   auto lookup = gtfsrt_trip_id_lookup_t{};
   auto ambiguous = std::unordered_set<std::string>{};
   auto const day_idx_iv =
-      n::interval{tt.day_idx(tt.internal_interval().from_),
-                  tt.day_idx(tt.internal_interval().to_)};
+      n::interval{tt.day_idx(date::floor<date::days>(tt.internal_interval().from_)),
+                  tt.day_idx(date::floor<date::days>(tt.internal_interval().to_))};
 
   for (auto r = n::route_idx_t{0}; r < tt.n_routes(); ++r) {
     for (auto const t_idx : tt.route_transport_ranges_[r]) {
       auto const& bitfield = tt.bitfields_[tt.transport_traffic_days_[t_idx]];
       for (auto const day_idx : day_idx_iv) {
-        if (!bitfield.test(to_idx(day_idx))) {
+        if (!bitfield.test(cista::to_idx(day_idx))) {
           continue;
         }
 
