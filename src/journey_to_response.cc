@@ -711,7 +711,7 @@ api::Itinerary journey_to_response(
         auto const& alt_to_loc = alt.legs_.back().to_;
         alternatives.push_back(
             journey_to_response(
-                w, l, pl, tt, tags, fl, e, rtt, matches, elevations, shapes,
+                w, l, pl, tt, tags, csr, fl, e, rtt, matches, elevations, shapes,
                 gbfs_rd, ae, tz_map, alt,
                 n::is_special(alt_from_loc)
                     ? start

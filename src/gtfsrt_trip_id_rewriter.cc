@@ -74,18 +74,20 @@ gtfsrt_trip_id_lookup_t build_gtfsrt_trip_id_lookup(
     std::string_view const tag) {
   auto lookup = gtfsrt_trip_id_lookup_t{};
   auto ambiguous = std::unordered_set<std::string>{};
+  auto const day_idx_iv =
+      n::interval{tt.day_idx(tt.internal_interval().from_),
+                  tt.day_idx(tt.internal_interval().to_)};
 
   for (auto r = n::route_idx_t{0}; r < tt.n_routes(); ++r) {
     for (auto const t_idx : tt.route_transport_ranges_[r]) {
-      for (auto const [day_idx, active] :
-           utl::enumerate(tt.bitfields_[tt.transport_traffic_days_[t_idx]])) {
-        if (!active) {
+      auto const& bitfield = tt.bitfields_[tt.transport_traffic_days_[t_idx]];
+      for (auto const day_idx : day_idx_iv) {
+        if (!bitfield.test(to_idx(day_idx))) {
           continue;
         }
 
-        auto const fr =
-            n::rt::frun::from_t(tt, &rtt, n::transport{t_idx, n::day_idx_t{
-                                                                  day_idx}});
+        auto const fr = n::rt::frun::from_t(tt, &rtt,
+                                            n::transport{t_idx, day_idx});
         fr.for_each_trip([&](n::trip_idx_t,
                              n::interval<n::stop_idx_t> const subrange) {
           auto const stop = fr[subrange.from_ - fr.stop_range_.from_];
