@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -129,6 +129,26 @@ jobs:
             ghcr.io/piotrski/motis:${{ github.ref_name }}
             ghcr.io/piotrski/motis:${{ github.sha }}
 
+      - name: Publish OpenAPI schema release asset
+        id: schema-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: motis-contract-${{ github.sha }}
+          SCHEMA_URL: https://github.com/piotrski/motis/releases/download/motis-contract-${{ github.sha }}/openapi.yaml
+        run: |
+          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" \
+              --target "${{ github.sha }}" \
+              --title "MOTIS contract ${{ github.sha }}" \
+              --notes "OpenAPI schema for MOTIS image ghcr.io/piotrski/motis:${{ github.sha }}" \
+              --latest=false
+          fi
+
+          gh release upload "${RELEASE_TAG}" openapi.yaml#openapi.yaml --clobber
+
+          echo "release_tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "schema_url=${SCHEMA_URL}" >> "${GITHUB_OUTPUT}"
+
       - name: Notify Transit contract sync
         env:
           GH_TOKEN: ${{ secrets.TRANSIT_CONTRACT_SYNC_TOKEN }}
@@ -142,6 +162,8 @@ jobs:
             --method POST \
             repos/piotrski/transit/dispatches \
             -f event_type=motis-contract-published \
+            -F "client_payload[schema_url]=${{ steps.schema-release.outputs.schema_url }}" \
+            -F "client_payload[motis_release_tag]=${{ steps.schema-release.outputs.release_tag }}" \
             -F "client_payload[motis_run_id]=${{ github.run_id }}" \
             -F "client_payload[motis_artifact_name]=openapi-yaml" \
             -F "client_payload[motis_ref]=${{ github.ref_name }}" \
