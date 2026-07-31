@@ -1,7 +1,7 @@
 [nigiri]
   url=https://github.com/piotrski/nigiri.git
   branch=fix/gtfsrt-adjacent-service-day
-  commit=364be0b9df2899c2662209556783e8596a251cae
+  commit=22e54f3c7187fe64060dfdc27a192289eb554af9
 [cista]
   url=git@github.com:felixguendling/cista.git
   branch=master
