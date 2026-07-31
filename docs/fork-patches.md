@@ -4,6 +4,15 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 
 ## Active Patches
 
+### GTFS-RT adjacent service-day resolution
+
+- Status: still required
+- Source: `piotrski/nigiri@fix/gtfsrt-adjacent-service-day`
+- Purpose: resolve trip descriptors without `start_date` against a unique adjacent service day so after-midnight trips keep realtime data; reject ambiguous matches
+- Tests to run:
+  - `nigiri-test --gtest_filter='rt.gtfsrt_resolve_static_trip:rt.gtfsrt_resolve_adjacent_service_day'`
+  - `nigiri-test --gtest_filter='rt.*'`
+
 ### Precompute stop class masks
 
 - Status: still required
