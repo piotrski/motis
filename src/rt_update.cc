@@ -263,6 +263,23 @@ void run_rt_update(boost::asio::io_context& ioc,
         while (true) {
           // Remember when we started, so we can schedule the next update.
           auto const start = std::chrono::steady_clock::now();
+          auto auser_cycle_touched = false;
+          auto const rollback_unpublished_auser = [&] {
+            if (!auser_cycle_touched) {
+              return;
+            }
+            auto reset_urls = std::set<std::string_view>{};
+            for (auto const& endpoint : endpoints) {
+              if (auto const* a = std::get_if<auser_endpoint>(&endpoint);
+                  a != nullptr && reset_urls.emplace(a->ep_.url_).second) {
+                d.auser_->at(a->ep_.url_).reset_for_resync();
+              }
+            }
+            if (mixed_incremental_sources) {
+              auser_rtt.reset();
+              auser_rtt_day.reset();
+            }
+          };
 
           try {
             auto t = utl::scoped_timer{"rt update"};
@@ -699,6 +716,7 @@ void run_rt_update(boost::asio::io_context& ioc,
                     auto& auser = d.auser_->at(a.ep_.url_);
                     auto& target =
                         mixed_incremental_sources ? *auser_rtt : *rtt;
+                    auser_cycle_touched = true;
                     results[prepared.endpoint_idx_] = {
                         auser.consume_update(*prepared.body_, target, true)};
                   } catch (std::exception const& e) {
@@ -775,6 +793,10 @@ void run_rt_update(boost::asio::io_context& ioc,
                   });
             }
 
+            if (hooks.before_rt_publish_) {
+              hooks.before_rt_publish_();
+            }
+
             // Update lbs.
             rtt->update_lbs(*d.tt_);
 
@@ -789,9 +811,11 @@ void run_rt_update(boost::asio::io_context& ioc,
 
             d.metrics_->last_update_rt_.SetToCurrentTime();
           } catch (std::exception const& e) {
+            rollback_unpublished_auser();
             n::log(n::log_lvl::error, "motis.rt",
                    "RT UPDATE CYCLE ERROR: error={}", e.what());
           } catch (...) {
+            rollback_unpublished_auser();
             n::log(n::log_lvl::error, "motis.rt",
                    "RT UPDATE CYCLE ERROR: error=unknown");
           }

@@ -9,6 +9,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #include "boost/asio/io_context.hpp"
 #include "boost/asio/ip/tcp.hpp"
@@ -897,6 +898,79 @@ TEST(motis_rt_update, mixed_auser_resynchronizes_on_service_day_rollover) {
 
 TEST(motis_rt_update, auser_only_resynchronizes_on_service_day_rollover) {
   test_auser_resynchronizes_on_service_day_rollover(false);
+}
+
+TEST(motis_rt_update, auser_cursor_advances_only_with_published_timetable) {
+  auto const test_dir =
+      fs::absolute("test/data/rt-auser-publication-transaction");
+  auto ec = std::error_code{};
+  fs::remove_all(test_dir, ec);
+  fs::create_directories(test_dir);
+  auto cwd = cwd_guard{test_dir};
+  auto const today =
+      std::chrono::floor<date::days>(std::chrono::system_clock::now());
+  auto const service_date = date::format("%Y%m%d", today);
+  auto const service_day = date::format("%F", today);
+  auto const gtfs = std::vformat(kGtfs, std::make_format_args(service_date));
+  auto const c = config{
+      .timetable_ = {config::timetable{
+          .first_day_ = service_day,
+          .num_days_ = 2,
+          .update_interval_ = 1,
+          .incremental_rt_update_ = true,
+          .canned_rt_ = true,
+          .datasets_ = {
+              {"test",
+               {.path_ = gtfs,
+                .rt_ = {{{.url_ = "https://example.test/auser",
+                          .protocol_ = config::timetable::dataset::rt::protocol::
+                              auser}}}}}}}}};
+  import(c, "data");
+  auto d = data{"data", c};
+  fs::create_directory("dump_rt");
+
+  auto const auser = std::format(
+      R"(<?xml version="1.0" encoding="UTF-8"?>
+<DatenAbrufenAntwort>
+  <AUSNachricht AboID="1" auser_id="1">
+    <IstFahrt Zst="{}T10:00:00">
+      <LinienID>route-1</LinienID>
+      <FahrtRef><FahrtID><FahrtBezeichner>trip-1</FahrtBezeichner><Betriebstag>{}</Betriebstag></FahrtID></FahrtRef>
+      <Komplettfahrt>true</Komplettfahrt><BetreiberID>test</BetreiberID>
+      <IstHalt><HaltID>stop-1</HaltID><Abfahrtszeit>{}T10:00:00</Abfahrtszeit><IstAbfahrtPrognose>{}T10:07:00</IstAbfahrtPrognose></IstHalt>
+      <IstHalt><HaltID>stop-2</HaltID><Ankunftszeit>{}T10:05:00</Ankunftszeit><IstAnkunftPrognose>{}T10:12:00</IstAnkunftPrognose></IstHalt>
+      <Zusatzfahrt>false</Zusatzfahrt><FaelltAus>false</FaelltAus>
+    </IstFahrt>
+  </AUSNachricht>
+</DatenAbrufenAntwort>)",
+      service_day, service_day, service_day, service_day, service_day,
+      service_day);
+  write_dump("auser", auser);
+
+  auto fail_before_first_publish = true;
+  auto ioc = boost::asio::io_context{};
+  run_rt_update(ioc, c, d,
+                {.before_rt_publish_ = [&] {
+                  if (std::exchange(fail_before_first_publish, false)) {
+                    throw std::runtime_error{"injected publication failure"};
+                  }
+                }});
+  ioc.run_for(100ms);
+
+  EXPECT_EQ(d.auser_->at("https://example.test/auser").update_state_, 0);
+  auto const after_failed_publish = query_stop_times(d);
+  ASSERT_EQ(after_failed_publish.stopTimes_.size(), 1U);
+  EXPECT_FALSE(after_failed_publish.stopTimes_.front().realTime_);
+
+  ioc.restart();
+  ioc.run_for(1100ms);
+  EXPECT_EQ(d.auser_->at("https://example.test/auser").update_state_, 1);
+  auto const after_retry = query_stop_times(d);
+  ASSERT_EQ(after_retry.stopTimes_.size(), 1U);
+  EXPECT_TRUE(after_retry.stopTimes_.front().realTime_);
+  EXPECT_EQ(static_cast<std::chrono::sys_seconds>(
+                *after_retry.stopTimes_.front().place_.departure_),
+            today + 10h + 7min);
 }
 
 
