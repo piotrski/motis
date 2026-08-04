@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -261,8 +263,25 @@ void run_rt_update(boost::asio::io_context& ioc,
         while (true) {
           // Remember when we started, so we can schedule the next update.
           auto const start = std::chrono::steady_clock::now();
+          auto auser_cycle_touched = false;
+          auto const rollback_unpublished_auser = [&] {
+            if (!auser_cycle_touched) {
+              return;
+            }
+            auto reset_urls = std::set<std::string_view>{};
+            for (auto const& endpoint : endpoints) {
+              if (auto const* a = std::get_if<auser_endpoint>(&endpoint);
+                  a != nullptr && reset_urls.emplace(a->ep_.url_).second) {
+                d.auser_->at(a->ep_.url_).reset_for_resync();
+              }
+            }
+            if (mixed_incremental_sources) {
+              auser_rtt.reset();
+              auser_rtt_day.reset();
+            }
+          };
 
-          {
+          try {
             auto t = utl::scoped_timer{"rt update"};
 
             // Create new real-time timetable.
@@ -305,13 +324,28 @@ void run_rt_update(boost::asio::io_context& ioc,
               stats_t stats_;
               bool source_success_{true};
             };
-
-            auto const apply_gtfsrt_update =
-                [&](gtfs_rt_endpoint const& g,
-                    std::string_view const body) -> update_result {
-              return {
-                  n::rt::gtfsrt_update_buf(*d.tt_, *rtt, g.src_, g.tag_, body)};
+            struct collected_update {
+              std::optional<std::string> body_;
+              std::exception_ptr error_;
             };
+            struct prepared_gtfsrt_update {
+              std::size_t endpoint_idx_;
+              std::optional<transit_realtime::FeedMessage> msg_;
+              bool source_success_{true};
+              bool commit_last_good_{false};
+            };
+            struct prepared_auser_update {
+              std::size_t endpoint_idx_;
+              std::optional<std::string> body_;
+            };
+            using prepared_update =
+                std::variant<prepared_gtfsrt_update, prepared_auser_update>;
+            struct update_group {
+              std::string tag_;
+              n::source_idx_t src_;
+              std::vector<prepared_update> updates_;
+            };
+
             auto const cache_age =
                 [](gtfs_rt_endpoint::last_good const& state,
                    std::chrono::steady_clock::time_point const now) {
@@ -327,7 +361,9 @@ void run_rt_update(boost::asio::io_context& ioc,
                     return false;
                   }
                   auto const age = cache_age(state, now);
-                  g.metrics_.last_good_expiry_.Increment();
+                  if (!state.expired_) {
+                    g.metrics_.last_good_expiry_.Increment();
+                  }
                   state.has_snapshot_ = false;
                   state.expired_ = true;
                   g.metrics_.set_source_state(gtfsrt_source_state::expired,
@@ -337,10 +373,11 @@ void run_rt_update(boost::asio::io_context& ioc,
                 };
             auto const commit_last_good =
                 [&](gtfs_rt_endpoint const& g,
-                    transit_realtime::FeedMessage candidate,
-                    std::chrono::seconds const age_at_receipt) {
+                    transit_realtime::FeedMessage candidate) {
                   auto& state = *g.last_good_;
                   auto const received_at = std::chrono::steady_clock::now();
+                  auto const age_at_receipt = gtfsrt_payload_age(
+                      candidate, std::chrono::system_clock::now());
                   auto const ttl = std::chrono::seconds{g.ep_.last_good_ttl_};
                   if (state.failed_ || state.expired_) {
                     g.metrics_.recovery_.Increment();
@@ -356,22 +393,19 @@ void run_rt_update(boost::asio::io_context& ioc,
                       gtfsrt_source_state::live,
                       static_cast<double>(age_at_receipt.count()), true);
                 };
-            auto const reuse_last_good =
-                [&](gtfs_rt_endpoint const& g) -> update_result {
+            auto const prepare_last_good = [&](std::size_t const endpoint_idx,
+                                               gtfs_rt_endpoint const& g) {
               auto const now = std::chrono::steady_clock::now();
               expire_cache(g, now);
               if (g.last_good_->has_snapshot_) {
                 g.last_good_->failed_ = true;
                 g.metrics_.last_good_reuse_.Increment();
-                auto const payload =
-                    g.last_good_->snapshot_.SerializeAsString();
-                auto result = apply_gtfsrt_update(g, payload);
                 g.metrics_.set_source_state(
                     gtfsrt_source_state::replay,
                     static_cast<double>(cache_age(*g.last_good_, now).count()),
                     true);
-                result.source_success_ = false;
-                return result;
+                return prepared_gtfsrt_update{
+                    endpoint_idx, g.last_good_->snapshot_, false, false};
               }
               g.last_good_->failed_ = true;
               auto const expired = g.last_good_->expired_;
@@ -383,146 +417,92 @@ void run_rt_update(boost::asio::io_context& ioc,
                                               ? gtfsrt_source_state::expired
                                               : gtfsrt_source_state::no_base,
                                           age, false);
-              return {n::rt::statistics{.parser_error_ = true}, false};
+              return prepared_gtfsrt_update{endpoint_idx, std::nullopt, false,
+                                            false};
             };
-            auto const reject_stale_candidate =
-                [&](gtfs_rt_endpoint const& g,
-                    std::chrono::seconds const age_at_receipt) {
-                  auto& state = *g.last_good_;
-                  state.failed_ = true;
-                  if (state.has_snapshot_) {
-                    return reuse_last_good(g);
-                  }
-                  if (state.expired_) {
+            auto const prepare_valid_gtfsrt =
+                [&](std::size_t const endpoint_idx, gtfs_rt_endpoint const& g,
+                    std::string_view const body) {
+                  auto msg = validate_gtfsrt_payload(body);
+                  auto const differential =
+                      msg.header().incrementality() ==
+                      transit_realtime::FeedHeader_Incrementality_DIFFERENTIAL;
+                  expire_cache(g, std::chrono::steady_clock::now());
+                  auto candidate = differential
+                                       ? materialize_gtfsrt_snapshot(
+                                             g.last_good_->snapshot_, msg)
+                                       : std::move(msg);
+                  candidate.mutable_header()->set_incrementality(
+                      transit_realtime::FeedHeader_Incrementality_FULL_DATASET);
+                  auto const age_at_receipt = gtfsrt_payload_age(
+                      candidate, std::chrono::system_clock::now());
+                  if (age_at_receipt >=
+                      std::chrono::seconds{g.ep_.last_good_ttl_}) {
+                    if (!c.timetable_->canned_rt_) {
+                      g.metrics_.updates_error_.Increment();
+                    }
+                    auto& state = *g.last_good_;
+                    state.failed_ = true;
+                    if (state.has_snapshot_) {
+                      return prepare_last_good(endpoint_idx, g);
+                    }
+                    if (state.expired_) {
+                      g.metrics_.set_source_state(
+                          gtfsrt_source_state::expired,
+                          static_cast<double>(cache_age(
+                                                  state,
+                                                  std::chrono::steady_clock::now())
+                                                  .count()),
+                          false);
+                      return prepared_gtfsrt_update{
+                          endpoint_idx, std::nullopt, false, false};
+                    }
+                    g.metrics_.last_good_expiry_.Increment();
+                    state.snapshot_.Clear();
+                    state.has_snapshot_ = false;
+                    state.received_at_ = std::chrono::steady_clock::now();
+                    state.expires_at_ = state.received_at_;
+                    state.age_at_receipt_ = age_at_receipt;
+                    state.expired_ = true;
                     g.metrics_.set_source_state(
                         gtfsrt_source_state::expired,
-                        static_cast<double>(cache_age(
-                                                state,
-                                                std::chrono::steady_clock::now())
-                                                .count()),
-                        false);
-                    return update_result{
-                        n::rt::statistics{.parser_error_ = true}, false};
+                        static_cast<double>(age_at_receipt.count()), false);
+                    return prepared_gtfsrt_update{
+                        endpoint_idx, std::nullopt, false, false};
                   }
-                  if (!state.expired_) {
-                    g.metrics_.last_good_expiry_.Increment();
-                  }
-                  state.snapshot_.Clear();
-                  state.has_snapshot_ = false;
-                  state.received_at_ = std::chrono::steady_clock::now();
-                  state.expires_at_ = state.received_at_;
-                  state.age_at_receipt_ = age_at_receipt;
-                  state.expired_ = true;
-                  g.metrics_.set_source_state(
-                      gtfsrt_source_state::expired,
-                      static_cast<double>(age_at_receipt.count()), false);
-                  return update_result{n::rt::statistics{.parser_error_ = true},
-                                       false};
+                  return prepared_gtfsrt_update{
+                      endpoint_idx, std::move(candidate), true, true};
                 };
-            auto const apply_valid_update =
+            auto const apply_gtfsrt =
                 [&](gtfs_rt_endpoint const& g,
-                    std::string_view const body) -> update_result {
-              auto validation = validate_gtfsrt_payload(body);
-              auto const differential =
-                  validation.header().incrementality() ==
-                  transit_realtime::FeedHeader_Incrementality_DIFFERENTIAL;
-              expire_cache(g, std::chrono::steady_clock::now());
-              auto candidate = differential
-                                   ? materialize_gtfsrt_snapshot(
-                                         g.last_good_->snapshot_, validation)
-                                   : std::move(validation);
-              candidate.mutable_header()->set_incrementality(
-                  transit_realtime::FeedHeader_Incrementality_FULL_DATASET);
-              auto const age_at_receipt = gtfsrt_payload_age(
-                  candidate, std::chrono::system_clock::now());
-              if (age_at_receipt >=
-                  std::chrono::seconds{g.ep_.last_good_ttl_}) {
-                g.metrics_.updates_error_.Increment();
-                return reject_stale_candidate(g, age_at_receipt);
-              }
-              auto const materialized = candidate.SerializeAsString();
+                    prepared_gtfsrt_update const& prepared,
+                    transit_realtime::FeedMessage const& msg,
+                    bool const fallback) {
+                  // GTFS-RT application mutates incrementally and can throw.
+                  // Apply to a private copy so a failed primary or fallback
+                  // cannot leak a partially changed timetable into this cycle.
+                  auto staged = *rtt;
+                  auto stats = n::rt::gtfsrt_update_msg(*d.tt_, staged, g.src_,
+                                                        g.tag_, msg);
+                  if (hooks.after_gtfsrt_apply_) {
+                    hooks.after_gtfsrt_apply_(prepared.endpoint_idx_, fallback);
+                  }
+                  if (prepared.commit_last_good_) {
+                    commit_last_good(g, msg);
+                  }
+                  rtt = std::make_unique<n::rt_timetable>(std::move(staged));
+                  return stats;
+                };
 
-              auto result = apply_gtfsrt_update(g, materialized);
-              commit_last_good(g, std::move(candidate), age_at_receipt);
-              return result;
-            };
+            // Collect every response before parsing or mutating the timetable.
+            auto collected = std::vector<collected_update>{};
+            collected.reserve(endpoints.size());
             if (c.timetable_->canned_rt_) {
               fmt::println("WARNING: READING CANNED RT");
-
-              auto const stats =
-                  utl::to_vec(endpoints, [&](auto&& ep) -> update_result {
-                    try {
-                      return utl::visit(
-                          ep,
-                          [&](gtfs_rt_endpoint const& g) -> update_result {
-                            auto const path = get_dump_path(g);
-                            auto const body = utl::read_file(path.c_str());
-                            if (body.has_value()) {
-                              return apply_valid_update(g, *body);
-                            } else {
-                              g.metrics_.fetch_error_.Increment();
-                              return reuse_last_good(g);
-                            }
-                          },
-                          [&](auser_endpoint const& a) -> update_result {
-                            auto const path = get_dump_path(a);
-                            auto& auser = d.auser_->at(a.ep_.url_);
-                            auto const body = utl::read_file(path.c_str());
-                            if (body.has_value()) {
-                              auto& target = mixed_incremental_sources
-                                                 ? *auser_rtt
-                                                 : *rtt;
-                              return {auser.consume_update(*body, target)};
-                            } else {
-                              return {
-                                  n::rt::vdv_aus::statistics{.error_ = true}};
-                            }
-                          });
-                    } catch (gtfsrt_payload_exception const& e) {
-                      std::cout << "EXCEPTION: " << e.what() << "\n";
-                      return utl::visit(
-                          ep,
-                          [&](gtfs_rt_endpoint const& g) {
-                            count_payload_error(g.metrics_, e.error_);
-                            return reuse_last_good(g);
-                          },
-                          [&](auser_endpoint const&) {
-                            return update_result{
-                                n::rt::statistics{.parser_error_ = true},
-                                false};
-                          });
-                    } catch (std::exception const& e) {
-                      std::cout << "EXCEPTION: " << e.what() << "\n";
-                      return utl::visit(
-                          ep,
-                          [&](gtfs_rt_endpoint const& g) {
-                            return reuse_last_good(g);
-                          },
-                          [&](auser_endpoint const&) {
-                            return update_result{
-                                n::rt::statistics{.parser_error_ = true},
-                                false};
-                          });
-                    }
-                  });
-
-              for (auto const [s, ep] : utl::zip(stats, endpoints)) {
-                utl::visit(
-                    ep,
-                    [&](gtfs_rt_endpoint const& g) {
-                      n::log(
-                          n::log_lvl::info, "motis.rt",
-                          "GTFS-RT update stats for tag={}, url={}: {}", g.tag_,
-                          g.ep_.url_,
-                          fmt::streamed(std::get<n::rt::statistics>(s.stats_)));
-                    },
-                    [&](auser_endpoint const& a) {
-                      n::log(n::log_lvl::info, "motis.rt",
-                             "VDV AUS update stats for tag={}, url={}:\n{}",
-                             a.tag_, a.ep_.url_,
-                             fmt::streamed(std::get<n::rt::vdv_aus::statistics>(
-                                 s.stats_)));
-                    });
+              for (auto const& ep : endpoints) {
+                auto const path = std::visit(
+                    [](auto const& x) { return get_dump_path(x); }, ep);
+                collected.push_back({.body_ = utl::read_file(path.c_str())});
               }
             } else if (!endpoints.empty()) {
               auto awaitables = utl::to_vec(
@@ -530,175 +510,291 @@ void run_rt_update(boost::asio::io_context& ioc,
                   [&](std::variant<gtfs_rt_endpoint, auser_endpoint> const& x) {
                     return boost::asio::co_spawn(
                         executor,
-                        [&]() -> awaitable<update_result> {
-                          auto ret = update_result{};
-                          co_await std::visit(
+                        [&, endpoint = &x]() -> awaitable<std::string> {
+                          co_return co_await std::visit(
                               utl::overloaded{
                                   [&](gtfs_rt_endpoint const& g)
-                                      -> awaitable<void> {
+                                      -> awaitable<std::string> {
                                     g.metrics_.updates_requested_.Increment();
-                                    try {
-                                      auto const res = co_await http_GET(
-                                          boost::urls::url{g.ep_.url_},
-                                          g.ep_.headers_.value_or(headers_t{}),
-                                          timeout);
-                                      auto const body = get_http_body(res);
-                                      if (dump_rt) {
-                                        std::ofstream{get_dump_path(g)}.write(
-                                            body.c_str(),
-                                            static_cast<long>(body.size()));
-                                      }
-                                      try {
-                                        ret = apply_valid_update(g, body);
-                                      } catch (
-                                          gtfsrt_payload_exception const& e) {
-                                        count_payload_error(g.metrics_,
-                                                            e.error_);
-                                        g.metrics_.updates_error_.Increment();
-                                        n::log(n::log_lvl::error, "motis.rt",
-                                               "RT PAYLOAD ERROR: tag={}, "
-                                               "error={}",
-                                               g.tag_, e.what());
-                                        ret = reuse_last_good(g);
-                                      } catch (std::exception const& e) {
-                                        g.metrics_.updates_error_.Increment();
-                                        n::log(
-                                            n::log_lvl::error, "motis.rt",
-                                            "RT APPLY ERROR: tag={}, error={}",
-                                            g.tag_, e.what());
-                                        ret = reuse_last_good(g);
-                                      }
-                                    } catch (std::exception const& e) {
-                                      g.metrics_.updates_error_.Increment();
-                                      g.metrics_.fetch_error_.Increment();
-                                      n::log(n::log_lvl::error, "motis.rt",
-                                             "RT FETCH ERROR: tag={}, error={}",
-                                             g.tag_, e.what());
-                                      ret = reuse_last_good(g);
+                                    auto const res = co_await http_GET(
+                                        boost::urls::url{g.ep_.url_},
+                                        g.ep_.headers_.value_or(headers_t{}),
+                                        timeout);
+                                    auto body = get_http_body(res);
+                                    if (dump_rt) {
+                                      std::ofstream{get_dump_path(g),
+                                                    std::ios::binary}
+                                          .write(body.data(), static_cast<long>(
+                                                                  body.size()));
                                     }
+                                    co_return body;
                                   },
                                   [&](auser_endpoint const& a)
-                                      -> awaitable<void> {
+                                      -> awaitable<std::string> {
                                     a.metrics_.updates_requested_.Increment();
                                     auto& auser = d.auser_->at(a.ep_.url_);
-                                    try {
-                                      auto const fetch_url = boost::urls::url{
-                                          auser.fetch_url(a.ep_.url_)};
-                                      fmt::println("[auser] fetch url: {}",
-                                                   fetch_url.c_str());
-                                      auto const res = co_await http_GET(
-                                          fetch_url,
-                                          a.ep_.headers_.value_or(headers_t{}),
-                                          timeout);
-                                      auto body = get_http_body(res);
-                                      if (dump_rt) {
-                                        std::ofstream{get_dump_path(a)}.write(
-                                            body.c_str(),
-                                            static_cast<long>(body.size()));
-                                      }
-                                      auto& target = mixed_incremental_sources
-                                                         ? *auser_rtt
-                                                         : *rtt;
-                                      ret = {auser.consume_update(body, target,
-                                                                  true)};
-                                    } catch (std::exception const& e) {
-                                      a.metrics_.updates_error_.Increment();
-                                      n::log(n::log_lvl::error, "motis.rt",
-                                             "VDV AUS FETCH ERROR: tag={}, "
-                                             "url={}, error={}",
-                                             a.tag_, a.ep_.url_, e.what());
-                                      ret = {nigiri::rt::vdv_aus::statistics{
-                                          .error_ = true}};
+                                    auto const fetch_url = boost::urls::url{
+                                        auser.fetch_url(a.ep_.url_)};
+                                    fmt::println("[auser] fetch url: {}",
+                                                 fetch_url.c_str());
+                                    auto const res = co_await http_GET(
+                                        fetch_url,
+                                        a.ep_.headers_.value_or(headers_t{}),
+                                        timeout);
+                                    auto body = get_http_body(res);
+                                    if (dump_rt) {
+                                      std::ofstream{get_dump_path(a),
+                                                    std::ios::binary}
+                                          .write(body.data(), static_cast<long>(
+                                                                  body.size()));
                                     }
+                                    co_return body;
                                   }},
-                              x);
-                          co_return ret;
+                              *endpoint);
                         },
                         asio::deferred);
                   });
 
-              // Wait for all updates to finish
-              auto [_, exceptions, stats] =
+              auto [_, exceptions, bodies] =
                   co_await asio::experimental::make_parallel_group(awaitables)
                       .async_wait(asio::experimental::wait_for_all(),
                                   asio::use_awaitable);
-
-              //  Print statistics.
-              for (auto const [ep, ex, s] :
-                   utl::zip(endpoints, exceptions, stats)) {
-                std::visit(
-                    utl::overloaded{
-                        [&](gtfs_rt_endpoint const& g) {
-                          try {
-                            if (ex) {
-                              std::rethrow_exception(ex);
-                            }
-
-                            if (s.source_success_) {
-                              g.metrics_.updates_successful_.Increment();
-                              g.metrics_.last_update_timestamp_
-                                  .SetToCurrentTime();
-                              g.metrics_.update(
-                                  std::get<n::rt::statistics>(s.stats_));
-                            }
-
-                            n::log(
-                                n::log_lvl::info, "motis.rt",
-                                "GTFS-RT update stats for tag={}, url={}: {}",
-                                g.tag_, g.ep_.url_,
-                                fmt::streamed(
-                                    std::get<n::rt::statistics>(s.stats_)));
-                          } catch (std::exception const& e) {
-                            g.metrics_.updates_error_.Increment();
-                            n::log(n::log_lvl::error, "motis.rt",
-                                   "GTFS-RT update failed: tag={}, url={}, "
-                                   "error={}",
-                                   g.tag_, g.ep_.url_, e.what());
-                          }
-                        },
-                        [&](auser_endpoint const& a) {
-                          try {
-                            if (ex) {
-                              std::rethrow_exception(ex);
-                            }
-
-                            a.metrics_.updates_successful_.Increment();
-                            a.metrics_.last_update_timestamp_
-                                .SetToCurrentTime();
-                            a.metrics_.update(
-                                std::get<n::rt::vdv_aus::statistics>(s.stats_));
-
-                            n::log(
-                                n::log_lvl::info, "motis.rt",
-                                "VDV AUS update stats for tag={}, url={}:\n{}",
-                                a.tag_, a.ep_.url_,
-                                fmt::streamed(
-                                    std::get<n::rt::vdv_aus::statistics>(
-                                        s.stats_)));
-                          } catch (std::exception const& e) {
-                            a.metrics_.updates_error_.Increment();
-                            n::log(n::log_lvl::error, "motis.rt",
-                                   "VDV AUS update failed: tag={}, url={}, "
-                                   "error={}",
-                                   a.tag_, a.ep_.url_, e.what());
-                          }
-                        }},
-                    ep);
+              for (auto&& [ex, body] : utl::zip(exceptions, bodies)) {
+                if (ex) {
+                  collected.push_back({std::nullopt, ex});
+                } else {
+                  collected.push_back({std::move(body), {}});
+                }
               }
             }
 
+            auto results = std::vector<update_result>(endpoints.size());
+            auto groups = std::vector<update_group>{};
+            auto const add_to_group = [&](std::size_t const endpoint_idx,
+                                          prepared_update update) {
+              auto const [tag, src] = std::visit(
+                  [](auto const& ep) { return std::pair{ep.tag_, ep.src_}; },
+                  endpoints[endpoint_idx]);
+              auto const it = std::find_if(
+                  groups.begin(), groups.end(), [&](update_group const& group) {
+                    return group.tag_ == tag && group.src_ == src;
+                  });
+              auto& group =
+                  it == groups.end() ? groups.emplace_back(tag, src) : *it;
+              group.updates_.push_back(std::move(update));
+            };
+
+            // Parse and group in configured endpoint order. Network completion
+            // order is deliberately absent from this phase.
+            for (auto endpoint_idx = std::size_t{0};
+                 endpoint_idx != endpoints.size(); ++endpoint_idx) {
+              auto const& ep = endpoints[endpoint_idx];
+              auto& fetched = collected[endpoint_idx];
+              utl::visit(
+                  ep,
+                  [&](gtfs_rt_endpoint const& g) {
+                    try {
+                      if (fetched.error_) {
+                        std::rethrow_exception(fetched.error_);
+                      }
+                      if (!fetched.body_) {
+                        throw std::runtime_error{
+                            "GTFS-RT fetch returned no "
+                            "payload"};
+                      }
+                      add_to_group(endpoint_idx,
+                                   prepare_valid_gtfsrt(endpoint_idx, g,
+                                                        *fetched.body_));
+                    } catch (gtfsrt_payload_exception const& e) {
+                      count_payload_error(g.metrics_, e.error_);
+                      if (!c.timetable_->canned_rt_) {
+                        g.metrics_.updates_error_.Increment();
+                      }
+                      n::log(n::log_lvl::error, "motis.rt",
+                             "RT PAYLOAD ERROR: tag={}, error={}", g.tag_,
+                             e.what());
+                      add_to_group(endpoint_idx,
+                                   prepare_last_good(endpoint_idx, g));
+                    } catch (std::exception const& e) {
+                      g.metrics_.fetch_error_.Increment();
+                      if (!c.timetable_->canned_rt_) {
+                        g.metrics_.updates_error_.Increment();
+                      }
+                      n::log(n::log_lvl::error, "motis.rt",
+                             "RT FETCH ERROR: tag={}, error={}", g.tag_,
+                             e.what());
+                      add_to_group(endpoint_idx,
+                                   prepare_last_good(endpoint_idx, g));
+                    }
+                  },
+                  [&](auser_endpoint const& a) {
+                    if (fetched.error_ || !fetched.body_) {
+                      if (fetched.error_) {
+                        try {
+                          std::rethrow_exception(fetched.error_);
+                        } catch (std::exception const& e) {
+                          n::log(n::log_lvl::error, "motis.rt",
+                                 "VDV AUS FETCH ERROR: tag={}, url={}, "
+                                 "error={}",
+                                 a.tag_, a.ep_.url_, e.what());
+                        }
+                      }
+                      if (!c.timetable_->canned_rt_) {
+                        a.metrics_.updates_error_.Increment();
+                      }
+                      results[endpoint_idx] = {
+                          n::rt::vdv_aus::statistics{.error_ = true}, false};
+                    }
+                    add_to_group(endpoint_idx,
+                                 prepared_auser_update{
+                                     endpoint_idx, std::move(fetched.body_)});
+                  });
+            }
+
+            auto const apply_prepared_gtfsrt =
+                [&](prepared_gtfsrt_update& prepared) {
+                  auto const& g = std::get<gtfs_rt_endpoint>(
+                      endpoints[prepared.endpoint_idx_]);
+                  if (!prepared.msg_) {
+                    results[prepared.endpoint_idx_] = {
+                        n::rt::statistics{.parser_error_ = true}, false};
+                    return;
+                  }
+                  try {
+                    auto stats =
+                        apply_gtfsrt(g, prepared, *prepared.msg_, false);
+                    results[prepared.endpoint_idx_] = {
+                        std::move(stats), prepared.source_success_};
+                  } catch (std::exception const& e) {
+                    if (!c.timetable_->canned_rt_) {
+                      g.metrics_.updates_error_.Increment();
+                    }
+                    n::log(n::log_lvl::error, "motis.rt",
+                           "RT APPLY ERROR: tag={}, error={}", g.tag_,
+                           e.what());
+                    auto fallback =
+                        prepare_last_good(prepared.endpoint_idx_, g);
+                    if (fallback.msg_) {
+                      try {
+                        results[prepared.endpoint_idx_] = {
+                            apply_gtfsrt(g, fallback, *fallback.msg_, true),
+                            false};
+                      } catch (std::exception const& fallback_error) {
+                        if (!c.timetable_->canned_rt_) {
+                          g.metrics_.updates_error_.Increment();
+                        }
+                        n::log(n::log_lvl::error, "motis.rt",
+                               "RT FALLBACK APPLY ERROR: tag={}, error={}",
+                               g.tag_, fallback_error.what());
+                        results[prepared.endpoint_idx_] = {
+                            n::rt::statistics{.parser_error_ = true}, false};
+                      } catch (...) {
+                        if (!c.timetable_->canned_rt_) {
+                          g.metrics_.updates_error_.Increment();
+                        }
+                        n::log(n::log_lvl::error, "motis.rt",
+                               "RT FALLBACK APPLY ERROR: tag={}, "
+                               "error=unknown",
+                               g.tag_);
+                        results[prepared.endpoint_idx_] = {
+                            n::rt::statistics{.parser_error_ = true}, false};
+                      }
+                    } else {
+                      results[prepared.endpoint_idx_] = {
+                          n::rt::statistics{.parser_error_ = true}, false};
+                    }
+                  }
+                };
+            auto const apply_prepared_auser =
+                [&](prepared_auser_update& prepared) {
+                  if (!prepared.body_) {
+                    return;
+                  }
+                  auto const& a = std::get<auser_endpoint>(
+                      endpoints[prepared.endpoint_idx_]);
+                  try {
+                    auto& auser = d.auser_->at(a.ep_.url_);
+                    auto& target =
+                        mixed_incremental_sources ? *auser_rtt : *rtt;
+                    auser_cycle_touched = true;
+                    results[prepared.endpoint_idx_] = {
+                        auser.consume_update(*prepared.body_, target, true)};
+                  } catch (std::exception const& e) {
+                    if (!c.timetable_->canned_rt_) {
+                      a.metrics_.updates_error_.Increment();
+                    }
+                    n::log(n::log_lvl::error, "motis.rt",
+                           "VDV AUS APPLY ERROR: tag={}, url={}, error={}",
+                           a.tag_, a.ep_.url_, e.what());
+                    results[prepared.endpoint_idx_] = {
+                        n::rt::vdv_aus::statistics{.error_ = true}, false};
+                  }
+                };
+
+            // Apply every prepared provider message once, serially and in
+            // configured order within its dataset/source group. Mixed
+            // incremental deployments first advance their persistent
+            // AUSER/SIRI baseline, then overlay GTFS snapshots on a copy.
             if (mixed_incremental_sources) {
-              rtt = std::make_unique<n::rt_timetable>(*auser_rtt);
-              for (auto const& ep : endpoints) {
-                if (auto const* g = std::get_if<gtfs_rt_endpoint>(&ep);
-                    g != nullptr) {
-                  expire_cache(*g, std::chrono::steady_clock::now());
-                  if (g->last_good_->has_snapshot_) {
-                    apply_gtfsrt_update(
-                        *g, g->last_good_->snapshot_.SerializeAsString());
+              for (auto& group : groups) {
+                for (auto& update : group.updates_) {
+                  if (auto* prepared =
+                          std::get_if<prepared_auser_update>(&update);
+                      prepared != nullptr) {
+                    apply_prepared_auser(*prepared);
                   }
                 }
               }
+              rtt = std::make_unique<n::rt_timetable>(*auser_rtt);
+              for (auto& group : groups) {
+                for (auto& update : group.updates_) {
+                  if (auto* prepared =
+                          std::get_if<prepared_gtfsrt_update>(&update);
+                      prepared != nullptr) {
+                    apply_prepared_gtfsrt(*prepared);
+                  }
+                }
+              }
+            } else {
+              for (auto& group : groups) {
+                for (auto& update : group.updates_) {
+                  utl::visit(update, apply_prepared_gtfsrt,
+                             apply_prepared_auser);
+                }
+              }
+            }
+
+            for (auto&& [ep, result] : utl::zip(endpoints, results)) {
+              utl::visit(
+                  ep,
+                  [&](gtfs_rt_endpoint const& g) {
+                    auto const& stats =
+                        std::get<n::rt::statistics>(result.stats_);
+                    if (!c.timetable_->canned_rt_ && result.source_success_) {
+                      g.metrics_.updates_successful_.Increment();
+                      g.metrics_.last_update_timestamp_.SetToCurrentTime();
+                      g.metrics_.update(stats);
+                    }
+                    n::log(n::log_lvl::info, "motis.rt",
+                           "GTFS-RT update stats for tag={}, url={}: {}",
+                           g.tag_, g.ep_.url_, fmt::streamed(stats));
+                  },
+                  [&](auser_endpoint const& a) {
+                    auto const& stats =
+                        std::get<n::rt::vdv_aus::statistics>(result.stats_);
+                    if (!c.timetable_->canned_rt_ && result.source_success_) {
+                      a.metrics_.updates_successful_.Increment();
+                      a.metrics_.last_update_timestamp_.SetToCurrentTime();
+                      a.metrics_.update(stats);
+                    }
+                    n::log(n::log_lvl::info, "motis.rt",
+                           "VDV AUS update stats for tag={}, url={}:\n{}",
+                           a.tag_, a.ep_.url_, fmt::streamed(stats));
+                  });
+            }
+
+            if (hooks.before_rt_publish_) {
+              hooks.before_rt_publish_();
             }
 
             // Update lbs.
@@ -714,6 +810,14 @@ void run_rt_update(boost::asio::io_context& ioc,
             std::atomic_store(&d.rt_, std::move(new_rt));
 
             d.metrics_->last_update_rt_.SetToCurrentTime();
+          } catch (std::exception const& e) {
+            rollback_unpublished_auser();
+            n::log(n::log_lvl::error, "motis.rt",
+                   "RT UPDATE CYCLE ERROR: error={}", e.what());
+          } catch (...) {
+            rollback_unpublished_auser();
+            n::log(n::log_lvl::error, "motis.rt",
+                   "RT UPDATE CYCLE ERROR: error=unknown");
           }
 
           // Schedule next update.

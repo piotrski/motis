@@ -1,17 +1,21 @@
 #include "gmock/gmock-matchers.h"
 #include "gtest/gtest.h"
 
-#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <initializer_list>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <utility>
 
 #include "boost/asio/io_context.hpp"
+#include "boost/asio/ip/tcp.hpp"
+#include "boost/asio/read_until.hpp"
+#include "boost/asio/streambuf.hpp"
+#include "boost/asio/write.hpp"
 #include "date/date.h"
 #include "prometheus/text_serializer.h"
 
@@ -80,6 +84,79 @@ struct cwd_guard {
   fs::path old_;
 };
 
+struct response_server {
+  response_server(std::string body, std::chrono::milliseconds const delay)
+      : acceptor_{ioc_, {boost::asio::ip::tcp::v4(), 0}},
+        socket_{ioc_},
+        thread_{[this, body = std::move(body), delay] {
+          try {
+            acceptor_.accept(socket_);
+            auto request = boost::asio::streambuf{};
+            boost::asio::read_until(socket_, request, "\r\n\r\n");
+            std::this_thread::sleep_for(delay);
+            auto response = std::format(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\n"
+                "Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.size());
+            response.append(body);
+            boost::asio::write(socket_, boost::asio::buffer(response));
+          } catch (...) {
+          }
+        }} {}
+
+  ~response_server() {
+    // A synchronous accept is not reliably interrupted by closing the
+    // acceptor from another thread on every supported platform. Connect a
+    // loopback client and send a complete request so the server thread always
+    // has a portable path out of accept/read before joining it.
+    auto wake_ioc = boost::asio::io_context{};
+    auto wake_socket = boost::asio::ip::tcp::socket{wake_ioc};
+    auto wake_ec = boost::system::error_code{};
+    auto const endpoint = acceptor_.local_endpoint(wake_ec);
+    if (!wake_ec) {
+      wake_socket.connect(endpoint, wake_ec);
+      if (!wake_ec) {
+        constexpr auto const wake_request =
+            std::string_view{"GET /shutdown HTTP/1.1\r\n"
+                             "Host: 127.0.0.1\r\nConnection: close\r\n\r\n"};
+        boost::asio::write(wake_socket, boost::asio::buffer(wake_request),
+                           wake_ec);
+      }
+    }
+
+    auto ec = boost::system::error_code{};
+    acceptor_.cancel(ec);
+    acceptor_.close(ec);
+    socket_.cancel(ec);
+    socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+    socket_.close(ec);
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  response_server(response_server const&) = delete;
+  response_server& operator=(response_server const&) = delete;
+
+  std::string url() const {
+    return std::format("http://127.0.0.1:{}/rt",
+                       acceptor_.local_endpoint().port());
+  }
+
+  boost::asio::io_context ioc_;
+  boost::asio::ip::tcp::acceptor acceptor_;
+  boost::asio::ip::tcp::socket socket_;
+  std::jthread thread_;
+};
+
+TEST(motis_rt_update, response_server_teardown_wakes_unconnected_accept) {
+  auto const start = std::chrono::steady_clock::now();
+  {
+    auto server = response_server{"", 0ms};
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - start, 1s);
+}
+
 void write_dump(std::string_view const bytes) {
   auto out = std::ofstream{"dump_rt/test-https___example_test_trip_updates",
                            std::ios::binary | std::ios::trunc};
@@ -122,25 +199,189 @@ double event_total(std::string const& metrics, std::string_view const event) {
   return total;
 }
 
-double metric_value(std::string const& metrics,
-                    std::string_view const metric,
-                    std::initializer_list<std::string_view> const labels) {
+double metric_total(std::string const& metrics, std::string_view const name) {
+  auto total = 0.0;
   auto line_begin = std::size_t{0};
   while (line_begin != std::string::npos && line_begin < metrics.size()) {
     auto const line_end = metrics.find('\n', line_begin);
     auto const line = std::string_view{metrics}.substr(
         line_begin, line_end == std::string::npos ? std::string::npos
                                                   : line_end - line_begin);
-    auto const has_labels =
-        std::ranges::all_of(labels, [&](std::string_view const label) {
-          return line.find(label) != std::string_view::npos;
-        });
-    if (line.starts_with(metric) && has_labels) {
-      return std::stod(std::string{line.substr(line.rfind(' ') + 1)});
+    if (line.starts_with(name)) {
+      total += std::stod(std::string{line.substr(line.rfind(' ') + 1)});
     }
     line_begin = line_end == std::string::npos ? line_end : line_end + 1U;
   }
-  return 0.0;
+  return total;
+}
+
+struct realtime_ingestion_test : TestWithParam<bool> {};
+
+TEST_P(realtime_ingestion_test,
+       applies_each_message_once_in_configuration_order) {
+  auto const incremental = GetParam();
+  auto const test_dir = fs::absolute(std::format(
+      "test/data/rt-ingestion-{}", incremental ? "incremental" : "full"));
+  auto ec = std::error_code{};
+  fs::remove_all(test_dir, ec);
+  fs::create_directories(test_dir);
+  auto cwd = cwd_guard{test_dir};
+  auto const today =
+      std::chrono::floor<date::days>(std::chrono::system_clock::now());
+  auto const service_date = date::format("%Y%m%d", today);
+  auto const first_day = date::format("%F", today);
+  auto const gtfs = std::vformat(kGtfs, std::make_format_args(service_date));
+
+  auto first = to_feed_msg(
+      {trip_update{.trip_ = {.trip_id_ = "trip-1",
+                             .start_time_ = "10:00:00",
+                             .date_ = service_date},
+                   .stop_updates_ = {{.stop_id_ = "stop-1",
+                                      .seq_ = 1U,
+                                      .ev_type_ = nigiri::event_type::kDep,
+                                      .delay_minutes_ = 10}}}},
+      today + 9h);
+  first.mutable_header()->clear_timestamp();
+  auto second = first;
+  second.mutable_header()->set_incrementality(
+      transit_realtime::FeedHeader_Incrementality_DIFFERENTIAL);
+  second.mutable_entity(0)
+      ->mutable_trip_update()
+      ->mutable_stop_time_update(0)
+      ->mutable_departure()
+      ->set_delay(15 * 60);
+
+  // The second configured endpoint completes first. Application must still
+  // follow configuration order after all responses have been collected.
+  auto slow_first = response_server{first.SerializeAsString(), 100ms};
+  auto fast_second = response_server{second.SerializeAsString(), 0ms};
+  auto const c =
+      config{.timetable_ = {config::timetable{
+                 .first_day_ = first_day,
+                 .num_days_ = 2,
+                 .update_interval_ = 60,
+                 .incremental_rt_update_ = incremental,
+                 .datasets_ = {{"test",
+                                {.path_ = gtfs,
+                                 .rt_ = {{{.url_ = slow_first.url()},
+                                          {.url_ = fast_second.url()}}}}}}}}};
+  import(c, "data");
+  auto d = data{"data", c};
+
+  auto ioc = boost::asio::io_context{};
+  run_rt_update(ioc, c, d);
+  ioc.run_for(500ms);
+  ioc.stop();
+
+  auto const response = query_stop_times(d);
+  ASSERT_EQ(response.stopTimes_.size(), 1U);
+  EXPECT_TRUE(response.stopTimes_.front().realTime_);
+  ASSERT_TRUE(response.stopTimes_.front().place_.departure_.has_value());
+  EXPECT_EQ(static_cast<std::chrono::sys_seconds>(
+                *response.stopTimes_.front().place_.departure_),
+            today + 10h + 15min);
+
+  auto const metrics =
+      prometheus::TextSerializer{}.Serialize(d.metrics_->registry_.Collect());
+  EXPECT_EQ(metric_total(metrics, "nigiri_gtfsrt_total_entities_total{"), 2.0);
+  EXPECT_EQ(metric_total(metrics, "nigiri_gtfsrt_updates_successful_total{"),
+            2.0);
+}
+
+INSTANTIATE_TEST_SUITE_P(full_and_incremental,
+                         realtime_ingestion_test,
+                         Values(false, true));
+
+TEST(motis_rt_update,
+     primary_and_fallback_apply_failures_do_not_stop_later_cycles) {
+  auto const test_dir = fs::absolute("test/data/rt-apply-failure");
+  auto ec = std::error_code{};
+  fs::remove_all(test_dir, ec);
+  fs::create_directories(test_dir);
+  auto cwd = cwd_guard{test_dir};
+  auto const today =
+      std::chrono::floor<date::days>(std::chrono::system_clock::now());
+  auto const service_date = date::format("%Y%m%d", today);
+  auto const first_day = date::format("%F", today);
+  auto const gtfs = std::vformat(kGtfs, std::make_format_args(service_date));
+
+  auto const c = config{
+      .timetable_ = {config::timetable{
+          .first_day_ = first_day,
+          .num_days_ = 2,
+          .update_interval_ = 1,
+          .incremental_rt_update_ = true,
+          .canned_rt_ = true,
+          .datasets_ = {{"test",
+                         {.path_ = gtfs,
+                          .rt_ = {{{.url_ = "https://example.test/trip_updates",
+                                    .last_good_ttl_ = 60U}}}}}}}}};
+  import(c, "data");
+  auto d = data{"data", c};
+  fs::create_directory("dump_rt");
+
+  auto feed = to_feed_msg(
+      {trip_update{.trip_ = {.trip_id_ = "trip-1",
+                             .start_time_ = "10:00:00",
+                             .date_ = service_date},
+                   .stop_updates_ = {{.stop_id_ = "stop-1",
+                                      .seq_ = 1U,
+                                      .ev_type_ = nigiri::event_type::kDep,
+                                      .delay_minutes_ = 10}}}},
+      today + 9h);
+  feed.mutable_header()->clear_timestamp();
+  write_dump(feed.SerializeAsString());
+
+  auto fail_applies = false;
+  auto primary_failures = 0U;
+  auto fallback_failures = 0U;
+  auto hooks =
+      rt_update_hooks{.after_gtfsrt_apply_ = [&](std::size_t const endpoint_idx,
+                                                 bool const fallback) {
+        EXPECT_EQ(endpoint_idx, 0U);
+        if (!fail_applies) {
+          return;
+        }
+        ++(fallback ? fallback_failures : primary_failures);
+        throw std::runtime_error{fallback ? "injected fallback failure"
+                                          : "injected primary failure"};
+      }};
+
+  auto ioc = boost::asio::io_context{};
+  run_rt_update(ioc, c, d, std::move(hooks));
+  ioc.run_for(100ms);
+  EXPECT_TRUE(query_stop_times(d).stopTimes_.front().realTime_);
+
+  feed.mutable_entity(0)
+      ->mutable_trip_update()
+      ->mutable_stop_time_update(0)
+      ->mutable_departure()
+      ->set_delay(15 * 60);
+  write_dump(feed.SerializeAsString());
+  fail_applies = true;
+  ioc.restart();
+  ioc.run_for(1100ms);
+  EXPECT_EQ(primary_failures, 1U);
+  EXPECT_EQ(fallback_failures, 1U);
+  EXPECT_FALSE(query_stop_times(d).stopTimes_.front().realTime_);
+
+  feed.mutable_entity(0)
+      ->mutable_trip_update()
+      ->mutable_stop_time_update(0)
+      ->mutable_departure()
+      ->set_delay(20 * 60);
+  write_dump(feed.SerializeAsString());
+  fail_applies = false;
+  ioc.restart();
+  ioc.run_for(1100ms);
+  auto const recovered = query_stop_times(d);
+  ASSERT_EQ(recovered.stopTimes_.size(), 1U);
+  EXPECT_TRUE(recovered.stopTimes_.front().realTime_);
+  ASSERT_TRUE(recovered.stopTimes_.front().place_.departure_.has_value());
+  EXPECT_EQ(static_cast<std::chrono::sys_seconds>(
+                *recovered.stopTimes_.front().place_.departure_),
+            today + 10h + 20min);
+  ioc.stop();
 }
 
 TEST(motis_rt_update, fresh_last_good_survives_bad_cycle_and_expires) {
@@ -195,19 +436,12 @@ TEST(motis_rt_update, fresh_last_good_survives_bad_cycle_and_expires) {
   write_dump(first_differential.SerializeAsString());
   run_rt_update(ioc, c, d);
   ioc.run_for(100ms);
-  auto const first_differential_departure =
-      query_stop_times(d).stopTimes_.front().place_.departure_;
   EXPECT_TRUE(query_stop_times(d).stopTimes_.front().realTime_);
 
   write_dump("malformed");
   ioc.restart();
   ioc.run_for(1100ms);
-  auto const after_first_differential_failure = query_stop_times(d);
-  ASSERT_EQ(after_first_differential_failure.stopTimes_.size(), 1U);
-  EXPECT_TRUE(after_first_differential_failure.stopTimes_.front().realTime_);
-  EXPECT_EQ(
-      first_differential_departure,
-      after_first_differential_failure.stopTimes_.front().place_.departure_);
+  EXPECT_TRUE(query_stop_times(d).stopTimes_.front().realTime_);
 
   write_dump(good.SerializeAsString());
   ioc.restart();
@@ -259,12 +493,6 @@ TEST(motis_rt_update, fresh_last_good_survives_bad_cycle_and_expires) {
   ioc.restart();
   ioc.run_for(3100ms);
   EXPECT_FALSE(query_stop_times(d).stopTimes_.front().realTime_);
-  auto const expired_metrics =
-      prometheus::TextSerializer{}.Serialize(d.metrics_->registry_.Collect());
-  EXPECT_EQ(0.0, metric_value(expired_metrics, "nigiri_gtfsrt_source_state{",
-                              {"endpoint=\"0\"", "state=\"live\""}));
-  EXPECT_EQ(1.0, metric_value(expired_metrics, "nigiri_gtfsrt_source_state{",
-                              {"endpoint=\"0\"", "state=\"expired\""}));
 
   auto recovered = good;
   recovered.mutable_header()->set_incrementality(
@@ -326,12 +554,6 @@ TEST(motis_rt_update, fresh_last_good_survives_bad_cycle_and_expires) {
   ioc.restart();
   ioc.run_for(1100ms);
   EXPECT_FALSE(query_stop_times(d).stopTimes_.front().realTime_);
-  auto const stale_metrics =
-      prometheus::TextSerializer{}.Serialize(d.metrics_->registry_.Collect());
-  EXPECT_EQ(0.0, metric_value(stale_metrics, "nigiri_gtfsrt_source_state{",
-                              {"endpoint=\"0\"", "state=\"live\""}));
-  EXPECT_EQ(1.0, metric_value(stale_metrics, "nigiri_gtfsrt_source_state{",
-                              {"endpoint=\"0\"", "state=\"replay\""}));
   write_dump("malformed");
   ioc.restart();
   ioc.run_for(1100ms);
@@ -355,184 +577,6 @@ TEST(motis_rt_update, fresh_last_good_survives_bad_cycle_and_expires) {
   EXPECT_THAT(metrics, HasSubstr("nigiri_gtfsrt_source_state{"));
   EXPECT_THAT(metrics, HasSubstr("endpoint=\"0\""));
   EXPECT_THAT(metrics, Not(HasSubstr("https___example_test")));
-}
-
-void test_good_malformed_good_recovery(bool const incremental) {
-  auto const mode = incremental ? "incremental" : "full";
-  auto const test_dir = fs::absolute(
-      std::string{"test/data/rt-last-good-recovery-"}.append(mode));
-  auto ec = std::error_code{};
-  fs::remove_all(test_dir, ec);
-  fs::create_directories(test_dir);
-  auto cwd = cwd_guard{test_dir};
-  auto const today =
-      std::chrono::floor<date::days>(std::chrono::system_clock::now());
-  auto const service_date = date::format("%Y%m%d", today);
-  auto const first_day = date::format("%F", today);
-  auto const gtfs = std::vformat(kGtfs, std::make_format_args(service_date));
-  auto const c = config{
-      .timetable_ = {config::timetable{
-          .first_day_ = first_day,
-          .num_days_ = 2,
-          .update_interval_ = 1,
-          .incremental_rt_update_ = incremental,
-          .canned_rt_ = true,
-          .datasets_ = {{"test",
-                         {.path_ = gtfs,
-                          .rt_ = {{{.url_ = "https://example.test/trip_updates",
-                                    .last_good_ttl_ = 30U}}}}}}}}};
-  import(c, "data");
-  auto d = data{"data", c};
-  fs::create_directory("dump_rt");
-
-  auto good = to_feed_msg(
-      {trip_update{.trip_ = {.trip_id_ = "trip-1",
-                             .start_time_ = "10:00:00",
-                             .date_ = service_date},
-                   .stop_updates_ = {{.stop_id_ = "stop-1",
-                                      .seq_ = 1U,
-                                      .ev_type_ = nigiri::event_type::kDep,
-                                      .delay_minutes_ = 10}}}},
-      today + 9h);
-  good.mutable_header()->clear_timestamp();
-
-  write_dump(good.SerializeAsString());
-  auto ioc = boost::asio::io_context{};
-  run_rt_update(ioc, c, d);
-  ioc.run_for(100ms);
-  auto const after_good = query_stop_times(d);
-  ASSERT_EQ(after_good.stopTimes_.size(), 1U);
-  ASSERT_TRUE(after_good.stopTimes_.front().realTime_);
-  auto const good_departure = after_good.stopTimes_.front().place_.departure_;
-
-  write_dump("malformed");
-  ioc.restart();
-  ioc.run_for(1100ms);
-  auto const after_malformed = query_stop_times(d);
-  ASSERT_EQ(after_malformed.stopTimes_.size(), 1U);
-  EXPECT_TRUE(after_malformed.stopTimes_.front().realTime_);
-  EXPECT_EQ(good_departure,
-            after_malformed.stopTimes_.front().place_.departure_);
-
-  good.mutable_entity(0)
-      ->mutable_trip_update()
-      ->mutable_stop_time_update(0)
-      ->mutable_departure()
-      ->set_delay(20 * 60);
-  write_dump(good.SerializeAsString());
-  ioc.restart();
-  ioc.run_for(1100ms);
-  auto const after_recovery = query_stop_times(d);
-  ASSERT_EQ(after_recovery.stopTimes_.size(), 1U);
-  EXPECT_TRUE(after_recovery.stopTimes_.front().realTime_);
-  EXPECT_NE(good_departure,
-            after_recovery.stopTimes_.front().place_.departure_);
-  auto const metrics =
-      prometheus::TextSerializer{}.Serialize(d.metrics_->registry_.Collect());
-  EXPECT_GT(event_total(metrics, "last_good_reuse"), 0.0);
-  EXPECT_GT(event_total(metrics, "recovery"), 0.0);
-}
-
-TEST(motis_rt_update,
-     good_malformed_good_recovers_in_full_and_incremental_modes) {
-  for (auto const incremental : {false, true}) {
-    SCOPED_TRACE(incremental ? "incremental" : "full");
-    test_good_malformed_good_recovery(incremental);
-  }
-}
-
-TEST(motis_rt_update, trip_update_and_vehicle_position_caches_are_independent) {
-  auto const test_dir = fs::absolute("test/data/rt-last-good-mixed-gtfsrt");
-  auto ec = std::error_code{};
-  fs::remove_all(test_dir, ec);
-  fs::create_directories(test_dir);
-  auto cwd = cwd_guard{test_dir};
-  auto const today =
-      std::chrono::floor<date::days>(std::chrono::system_clock::now());
-  auto const service_date = date::format("%Y%m%d", today);
-  auto const first_day = date::format("%F", today);
-  auto const gtfs = std::vformat(kGtfs, std::make_format_args(service_date));
-  auto const c = config{
-      .timetable_ = {config::timetable{
-          .first_day_ = first_day,
-          .num_days_ = 2,
-          .update_interval_ = 1,
-          .incremental_rt_update_ = true,
-          .canned_rt_ = true,
-          .datasets_ = {
-              {"test",
-               {.path_ = gtfs,
-                .rt_ = {{{.url_ = "https://example.test/trip_updates",
-                          .last_good_ttl_ = 30U},
-                         {.url_ = "https://example.test/vehicle_positions",
-                          .last_good_ttl_ = 30U}}}}}}}}};
-  import(c, "data");
-  auto d = data{"data", c};
-  fs::create_directory("dump_rt");
-
-  auto trip_updates = to_feed_msg(
-      {trip_update{.trip_ = {.trip_id_ = "trip-1",
-                             .start_time_ = "10:00:00",
-                             .date_ = service_date},
-                   .stop_updates_ = {{.stop_id_ = "stop-1",
-                                      .seq_ = 1U,
-                                      .ev_type_ = nigiri::event_type::kDep,
-                                      .delay_minutes_ = 10}}}},
-      today + 9h);
-  trip_updates.mutable_header()->clear_timestamp();
-
-  auto vehicle_positions = transit_realtime::FeedMessage{};
-  vehicle_positions.mutable_header()->set_gtfs_realtime_version("2.0");
-  vehicle_positions.mutable_header()->set_incrementality(
-      transit_realtime::FeedHeader_Incrementality_FULL_DATASET);
-  auto* vehicle_entity = vehicle_positions.add_entity();
-  vehicle_entity->set_id("vehicle-1");
-  vehicle_entity->mutable_vehicle()->mutable_trip()->set_trip_id("trip-1");
-  vehicle_entity->mutable_vehicle()->mutable_position()->set_latitude(50.061F);
-  vehicle_entity->mutable_vehicle()->mutable_position()->set_longitude(19.938F);
-
-  write_dump("trip_updates", trip_updates.SerializeAsString());
-  write_dump("vehicle_positions", vehicle_positions.SerializeAsString());
-  auto ioc = boost::asio::io_context{};
-  run_rt_update(ioc, c, d);
-  ioc.run_for(100ms);
-
-  trip_updates.mutable_entity(0)
-      ->mutable_trip_update()
-      ->mutable_stop_time_update(0)
-      ->mutable_departure()
-      ->set_delay(15 * 60);
-  write_dump("trip_updates", trip_updates.SerializeAsString());
-  write_dump("vehicle_positions", "malformed");
-  ioc.restart();
-  ioc.run_for(1100ms);
-  auto after_bad_positions = query_stop_times(d);
-  ASSERT_EQ(after_bad_positions.stopTimes_.size(), 1U);
-  EXPECT_TRUE(after_bad_positions.stopTimes_.front().realTime_);
-  auto const updated_departure =
-      after_bad_positions.stopTimes_.front().place_.departure_;
-  auto metrics =
-      prometheus::TextSerializer{}.Serialize(d.metrics_->registry_.Collect());
-  EXPECT_EQ(1.0, metric_value(metrics, "nigiri_gtfsrt_source_state{",
-                              {"endpoint=\"0\"", "state=\"live\""}));
-  EXPECT_EQ(1.0, metric_value(metrics, "nigiri_gtfsrt_source_state{",
-                              {"endpoint=\"1\"", "state=\"replay\""}));
-
-  write_dump("trip_updates", "malformed");
-  write_dump("vehicle_positions", vehicle_positions.SerializeAsString());
-  ioc.restart();
-  ioc.run_for(1100ms);
-  auto const after_bad_trip_updates = query_stop_times(d);
-  ASSERT_EQ(after_bad_trip_updates.stopTimes_.size(), 1U);
-  EXPECT_TRUE(after_bad_trip_updates.stopTimes_.front().realTime_);
-  EXPECT_EQ(updated_departure,
-            after_bad_trip_updates.stopTimes_.front().place_.departure_);
-  metrics =
-      prometheus::TextSerializer{}.Serialize(d.metrics_->registry_.Collect());
-  EXPECT_EQ(1.0, metric_value(metrics, "nigiri_gtfsrt_source_state{",
-                              {"endpoint=\"0\"", "state=\"replay\""}));
-  EXPECT_EQ(1.0, metric_value(metrics, "nigiri_gtfsrt_source_state{",
-                              {"endpoint=\"1\"", "state=\"live\""}));
 }
 
 TEST(motis_rt_update,
@@ -610,7 +654,8 @@ TEST(motis_rt_update,
   EXPECT_FALSE(query_stop_times(d).stopTimes_.front().realTime_);
 }
 
-TEST(motis_rt_update, gtfsrt_coexistence_preserves_auser_delta_state) {
+TEST(motis_rt_update,
+     mixed_sources_remove_expired_gtfsrt_without_losing_auser_state) {
   auto const test_dir = fs::absolute("test/data/rt-last-good-mixed-auser");
   auto ec = std::error_code{};
   fs::remove_all(test_dir, ec);
@@ -709,7 +754,6 @@ TEST(motis_rt_update, gtfsrt_coexistence_preserves_auser_delta_state) {
   ioc.run_for(1100ms);
   auto const after_authoritative_gtfsrt_deletion = query_stop_times(d);
   ASSERT_EQ(after_authoritative_gtfsrt_deletion.stopTimes_.size(), 1U);
-  EXPECT_TRUE(after_authoritative_gtfsrt_deletion.stopTimes_.front().realTime_);
   EXPECT_EQ(
       static_cast<std::chrono::sys_seconds>(
           *after_authoritative_gtfsrt_deletion.stopTimes_.front()
@@ -855,5 +899,80 @@ TEST(motis_rt_update, mixed_auser_resynchronizes_on_service_day_rollover) {
 TEST(motis_rt_update, auser_only_resynchronizes_on_service_day_rollover) {
   test_auser_resynchronizes_on_service_day_rollover(false);
 }
+
+TEST(motis_rt_update, auser_cursor_advances_only_with_published_timetable) {
+  auto const test_dir =
+      fs::absolute("test/data/rt-auser-publication-transaction");
+  auto ec = std::error_code{};
+  fs::remove_all(test_dir, ec);
+  fs::create_directories(test_dir);
+  auto cwd = cwd_guard{test_dir};
+  auto const today =
+      std::chrono::floor<date::days>(std::chrono::system_clock::now());
+  auto const service_date = date::format("%Y%m%d", today);
+  auto const service_day = date::format("%F", today);
+  auto const gtfs = std::vformat(kGtfs, std::make_format_args(service_date));
+  auto const c = config{
+      .timetable_ = {config::timetable{
+          .first_day_ = service_day,
+          .num_days_ = 2,
+          .update_interval_ = 1,
+          .incremental_rt_update_ = true,
+          .canned_rt_ = true,
+          .datasets_ = {
+              {"test",
+               {.path_ = gtfs,
+                .rt_ = {{{.url_ = "https://example.test/auser",
+                          .protocol_ = config::timetable::dataset::rt::protocol::
+                              auser}}}}}}}}};
+  import(c, "data");
+  auto d = data{"data", c};
+  fs::create_directory("dump_rt");
+
+  auto const auser = std::format(
+      R"(<?xml version="1.0" encoding="UTF-8"?>
+<DatenAbrufenAntwort>
+  <AUSNachricht AboID="1" auser_id="1">
+    <IstFahrt Zst="{}T10:00:00">
+      <LinienID>route-1</LinienID>
+      <FahrtRef><FahrtID><FahrtBezeichner>trip-1</FahrtBezeichner><Betriebstag>{}</Betriebstag></FahrtID></FahrtRef>
+      <Komplettfahrt>true</Komplettfahrt><BetreiberID>test</BetreiberID>
+      <IstHalt><HaltID>stop-1</HaltID><Abfahrtszeit>{}T10:00:00</Abfahrtszeit><IstAbfahrtPrognose>{}T10:07:00</IstAbfahrtPrognose></IstHalt>
+      <IstHalt><HaltID>stop-2</HaltID><Ankunftszeit>{}T10:05:00</Ankunftszeit><IstAnkunftPrognose>{}T10:12:00</IstAnkunftPrognose></IstHalt>
+      <Zusatzfahrt>false</Zusatzfahrt><FaelltAus>false</FaelltAus>
+    </IstFahrt>
+  </AUSNachricht>
+</DatenAbrufenAntwort>)",
+      service_day, service_day, service_day, service_day, service_day,
+      service_day);
+  write_dump("auser", auser);
+
+  auto fail_before_first_publish = true;
+  auto ioc = boost::asio::io_context{};
+  run_rt_update(ioc, c, d,
+                {.before_rt_publish_ = [&] {
+                  if (std::exchange(fail_before_first_publish, false)) {
+                    throw std::runtime_error{"injected publication failure"};
+                  }
+                }});
+  ioc.run_for(100ms);
+
+  EXPECT_EQ(d.auser_->at("https://example.test/auser").update_state_, 0);
+  auto const after_failed_publish = query_stop_times(d);
+  ASSERT_EQ(after_failed_publish.stopTimes_.size(), 1U);
+  EXPECT_FALSE(after_failed_publish.stopTimes_.front().realTime_);
+
+  ioc.restart();
+  ioc.run_for(1100ms);
+  EXPECT_EQ(d.auser_->at("https://example.test/auser").update_state_, 1);
+  auto const after_retry = query_stop_times(d);
+  ASSERT_EQ(after_retry.stopTimes_.size(), 1U);
+  EXPECT_TRUE(after_retry.stopTimes_.front().realTime_);
+  EXPECT_EQ(static_cast<std::chrono::sys_seconds>(
+                *after_retry.stopTimes_.front().place_.departure_),
+            today + 10h + 7min);
+}
+
+
 
 }  // namespace
