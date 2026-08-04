@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -374,6 +375,34 @@ TEST(vehicle_observation_history,
     EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_,
               "e1");
   }
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_trip_changes_are_order_independent) {
+  auto order = std::array{0U, 1U, 2U};
+  do {
+    SCOPED_TRACE(testing::Message() << order[0] << order[1] << order[2]);
+    auto history = vehicle_observation_history{};
+    auto const current = std::array{observation(100, 100, "e1", "V", "trip-a")};
+    history.replace_feed("feed", current, 100, kPolicy);
+
+    auto const candidates =
+        std::array{observation(150, 50, "e1", "V", "trip-a"),
+                   observation(150, 150, "e1", "W", "trip-a"),
+                   observation(200, 200, "e2", "W", "trip-b")};
+    auto replacement = std::array{candidates[order[0]], candidates[order[1]],
+                                  candidates[order[2]]};
+    history.replace_feed("feed", replacement, 200, kPolicy);
+
+    ASSERT_NE(history.current_observation(descriptor_key("V")), nullptr);
+    EXPECT_EQ(history.current_observation(descriptor_key("V"))->reported_time_,
+              100);
+    ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+    EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_,
+              "e2");
+    EXPECT_EQ(history.current_observation(descriptor_key("W"))->trip_.trip_id_,
+              "trip-b");
+  } while (std::ranges::next_permutation(order).found);
 }
 
 TEST(vehicle_observation_history,
