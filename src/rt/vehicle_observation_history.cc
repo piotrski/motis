@@ -204,28 +204,6 @@ vehicle_observation_history::validate_batch(
     std::string_view const feed_id,
     std::span<vehicle_observation const> observations,
     locator_evidence const evidence) const {
-  auto newest_by_vehicle =
-      std::unordered_map<vehicle_key, vehicle_observation, vehicle_key_hash>{};
-  for (auto observation : observations) {
-    observation.feed_id_ = feed_id;
-    auto const key = make_vehicle_key(observation);
-    if (!key.has_value()) {
-      continue;
-    }
-    auto const [it, inserted] =
-        newest_by_vehicle.try_emplace(*key, observation);
-    if (!inserted && order_key(it->second) < order_key(observation)) {
-      it->second = std::move(observation);
-    }
-  }
-  auto const is_superseded_trip = [&](vehicle_observation const& observation) {
-    auto const key = make_vehicle_key(observation);
-    auto const newest =
-        key.has_value() ? newest_by_vehicle.find(*key) : end(newest_by_vehicle);
-    return newest != end(newest_by_vehicle) &&
-           newest->second.trip_ != observation.trip_;
-  };
-
   auto batch = validated_batch{};
   batch.dispositions_.reserve(observations.size());
   batch.establishes_current_.reserve(observations.size());
@@ -233,9 +211,7 @@ vehicle_observation_history::validate_batch(
   for (auto observation : observations) {
     observation.feed_id_ = feed_id;
     auto const disposition =
-        is_superseded_trip(observation)
-            ? ingest_disposition::kRejected
-            : classify_unpruned(observation, batch.locators_, evidence);
+        classify_unpruned(observation, batch.locators_, evidence);
     batch.dispositions_.emplace_back(disposition);
     auto const establishes = disposition == ingest_disposition::kAccepted &&
                              establishes_current(observation);
@@ -259,9 +235,8 @@ vehicle_observation_history::validate_batch(
       }
       auto observation = observations[idx];
       observation.feed_id_ = feed_id;
-      if (is_superseded_trip(observation) ||
-          classify_unpruned(observation, batch.locators_, evidence) !=
-              ingest_disposition::kAccepted) {
+      if (classify_unpruned(observation, batch.locators_, evidence) !=
+          ingest_disposition::kAccepted) {
         continue;
       }
       batch.dispositions_[idx] = ingest_disposition::kAccepted;
@@ -272,6 +247,48 @@ vehicle_observation_history::validate_batch(
         batch.locators_.emplace_back(*key, observation.entity_id_);
       }
       changed = true;
+    }
+  }
+
+  // Only a candidate that survived identity validation may supersede another
+  // trip for the same vehicle. A newer rejected reassignment must not hide an
+  // otherwise valid same-trip update.
+  auto newest_by_vehicle =
+      std::unordered_map<vehicle_key, vehicle_observation, vehicle_key_hash>{};
+  for (auto idx = 0U; idx != observations.size(); ++idx) {
+    if (batch.dispositions_[idx] != ingest_disposition::kAccepted) {
+      continue;
+    }
+    auto observation = observations[idx];
+    observation.feed_id_ = feed_id;
+    auto const key = make_vehicle_key(observation);
+    if (!key.has_value()) {
+      continue;
+    }
+    auto const [it, inserted] =
+        newest_by_vehicle.try_emplace(*key, observation);
+    if (!inserted && order_key(it->second) < order_key(observation)) {
+      it->second = std::move(observation);
+    }
+  }
+
+  batch.locators_.clear();
+  for (auto idx = 0U; idx != observations.size(); ++idx) {
+    auto observation = observations[idx];
+    observation.feed_id_ = feed_id;
+    auto const key = make_vehicle_key(observation);
+    auto const newest =
+        key.has_value() ? newest_by_vehicle.find(*key) : end(newest_by_vehicle);
+    if (batch.dispositions_[idx] == ingest_disposition::kAccepted &&
+        newest != end(newest_by_vehicle) &&
+        newest->second.trip_ != observation.trip_) {
+      batch.dispositions_[idx] = ingest_disposition::kRejected;
+      batch.establishes_current_[idx] = false;
+    }
+    if (batch.dispositions_[idx] == ingest_disposition::kAccepted &&
+        batch.establishes_current_[idx] && key.has_value() &&
+        !observation.entity_id_.empty()) {
+      batch.locators_.emplace_back(*key, observation.entity_id_);
     }
   }
   return batch;

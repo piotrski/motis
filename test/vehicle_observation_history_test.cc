@@ -406,6 +406,40 @@ TEST(vehicle_observation_history,
 }
 
 TEST(vehicle_observation_history,
+     rejected_trip_change_does_not_suppress_valid_same_trip_update) {
+  for (auto const differential : {false, true}) {
+    for (auto const reverse : {false, true}) {
+      SCOPED_TRACE(differential);
+      SCOPED_TRACE(reverse);
+      auto history = vehicle_observation_history{};
+      auto const current =
+          std::array{observation(200, 200, "e1", "V", "trip-a"),
+                     observation(300, 300, "e2", "U", "trip-a")};
+      history.replace_feed("feed", current, 300, kPolicy);
+
+      auto replacement = std::array{observation(210, 210, "e1", "V", "trip-a"),
+                                    observation(250, 250, "e2", "V", "trip-b")};
+      if (reverse) {
+        std::swap(replacement[0], replacement[1]);
+      }
+      if (differential) {
+        history.update_feed("feed", replacement, {}, 300, kPolicy);
+      } else {
+        history.replace_feed("feed", replacement, 300, kPolicy);
+      }
+
+      ASSERT_NE(history.current_observation(descriptor_key("V")), nullptr);
+      EXPECT_EQ(
+          history.current_observation(descriptor_key("V"))->reported_time_,
+          210);
+      EXPECT_EQ(
+          history.current_observation(descriptor_key("V"))->trip_.trip_id_,
+          "trip-a");
+    }
+  }
+}
+
+TEST(vehicle_observation_history,
      history_only_alternate_does_not_authorize_entity_reuse) {
   for (auto const differential : {false, true}) {
     for (auto const reverse : {false, true}) {

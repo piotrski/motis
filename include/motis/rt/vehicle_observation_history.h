@@ -113,7 +113,7 @@ private:
 
   struct history_entry {
     vehicle_trip_instance trip_;
-    std::vector<vehicle_observation> observations_;
+    std::vector<vehicle_observation> observations_{};
   };
 
   struct batch_locator {
