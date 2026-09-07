@@ -39,11 +39,11 @@ enum class trip_progress_diagnostic_status {
 };
 
 struct trip_progress_diagnostic {
-  std::string feed_;
-  std::optional<nigiri::clasz> mode_;
+  std::string feed_{};
+  std::optional<nigiri::clasz> mode_{};
   trip_progress_diagnostic_status status_{
       trip_progress_diagnostic_status::kUnresolvedTrip};
-  std::optional<double> lateral_error_m_;
+  std::optional<double> lateral_error_m_{};
 };
 
 [[nodiscard]] char const* to_str(trip_progress_diagnostic_status);

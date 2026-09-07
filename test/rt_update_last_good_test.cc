@@ -215,19 +215,23 @@ TEST(motis_rt_update,
       {trip_update{.trip_ = {.trip_id_ = "trip-1",
                              .start_time_ = "10:00:00",
                              .date_ = service_date},
-                   .stop_updates_ = {{.stop_id_ = "stop-2",
-                                      .seq_ = 2U,
-                                      .ev_type_ = nigiri::event_type::kArr,
-                                      .delay_minutes_ = 10}}}},
+                   .stop_updates_ = {{.stop_id_ = "stop-1",
+                                      .seq_ = 1U,
+                                      .ev_type_ = nigiri::event_type::kDep}}}},
       today + 9h);
   feed.mutable_header()->clear_timestamp();
+  feed.mutable_entity(0)
+      ->mutable_trip_update()
+      ->mutable_stop_time_update(0)
+      ->mutable_departure()
+      ->set_delay(75);
   auto extreme = feed;
-  auto* extreme_arrival = extreme.mutable_entity(0)
-                              ->mutable_trip_update()
-                              ->mutable_stop_time_update(0)
-                              ->mutable_arrival();
-  extreme_arrival->clear_delay();
-  extreme_arrival->set_time(std::numeric_limits<std::int64_t>::max());
+  auto* extreme_departure = extreme.mutable_entity(0)
+                                ->mutable_trip_update()
+                                ->mutable_stop_time_update(0)
+                                ->mutable_departure();
+  extreme_departure->clear_delay();
+  extreme_departure->set_time(std::numeric_limits<std::int64_t>::max());
 
   auto server = response_server{
       std::vector{feed.SerializeAsString(), extreme.SerializeAsString()}, 0ms};
@@ -237,9 +241,8 @@ TEST(motis_rt_update,
           .num_days_ = 2,
           .update_interval_ = 1,
           .datasets_ = {{"test",
-                         {.path_ = gtfs, .rt_ = {{{.url_ = server.url()}}}}}},
-          .vehicle_eta_ = config::timetable::vehicle_eta{
-              .mode_ = config::timetable::vehicle_eta::mode::shadow}}}};
+                         {.path_ = gtfs,
+                          .rt_ = {{{.url_ = server.url()}}}}}}}}};
   import(c, "data");
   auto d = data{"data", c};
 
@@ -248,7 +251,7 @@ TEST(motis_rt_update,
   ioc.run_for(500ms);
 
   auto const response = utl::init_from<ep::stop_times>(d).value()(
-      std::format("/api/v5/stoptimes?stopId=test_stop-2"
+      std::format("/api/v6/stoptimes?stopId=test_stop-2"
                   "&time={}T11:00:00Z&arriveBy=true&n=1"
                   "&includePredictionComparison=true",
                   date::format("%F", today)));
@@ -258,12 +261,14 @@ TEST(motis_rt_update,
   ASSERT_EQ(response.predictionDebug_->size(), 1U);
   auto const& debug = response.predictionDebug_->front();
   ASSERT_TRUE(debug.provider_.has_value());
-  EXPECT_EQ(debug.provider_->delaySeconds_, 10min / 1s);
+  EXPECT_EQ(debug.provider_->delaySeconds_, 75);
   EXPECT_FALSE(debug.gps_.has_value());
+  ASSERT_TRUE(response.stopTimes_.front().selectedPrediction_.has_value());
+  EXPECT_EQ(response.stopTimes_.front().selectedPrediction_->delaySeconds_, 75);
 
   auto const untouched = utl::init_from<ep::stop_times>(d).value()(
       std::format("/api/v6/stoptimes?stopId=test_stop-1"
-                  "&time={}T09:00:00Z&n=1",
+                  "&time={}T10:30:00Z&n=1",
                   date::format("%F", today)));
   ASSERT_EQ(untouched.stopTimes_.size(), 1U);
   ASSERT_TRUE(untouched.stopTimes_.front().selectedPrediction_.has_value());
@@ -470,6 +475,9 @@ TEST(motis_rt_update, merges_disjoint_provider_events_for_the_same_trip) {
                                       .ev_type_ = nigiri::event_type::kDep}}}},
       today + 9h);
   feed.mutable_header()->clear_timestamp();
+  feed.mutable_entity(0)->mutable_trip_update()->set_timestamp(100U);
+  feed.mutable_entity(1)->mutable_trip_update()->set_timestamp(200U);
+  feed.mutable_entity(2)->mutable_trip_update()->set_timestamp(300U);
   feed.mutable_entity(0)
       ->mutable_trip_update()
       ->mutable_stop_time_update(0)
@@ -492,10 +500,8 @@ TEST(motis_rt_update, merges_disjoint_provider_events_for_the_same_trip) {
           .first_day_ = first_day,
           .num_days_ = 2,
           .update_interval_ = 60,
-          .datasets_ = {{"test",
-                         {.path_ = gtfs, .rt_ = {{{.url_ = server.url()}}}}}},
-          .vehicle_eta_ = config::timetable::vehicle_eta{
-              .mode_ = config::timetable::vehicle_eta::mode::shadow}}}};
+          .datasets_ = {
+              {"test", {.path_ = gtfs, .rt_ = {{{.url_ = server.url()}}}}}}}}};
   import(c, "data");
   auto d = data{"data", c};
 
@@ -513,6 +519,7 @@ TEST(motis_rt_update, merges_disjoint_provider_events_for_the_same_trip) {
   ASSERT_EQ(departure.predictionDebug_->size(), 1U);
   ASSERT_TRUE(departure.predictionDebug_->front().provider_.has_value());
   EXPECT_EQ(departure.predictionDebug_->front().provider_->delaySeconds_, 183);
+  EXPECT_EQ(departure.predictionDebug_->front().provider_->referenceTime_, 300);
 
   auto const arrival = endpoint(std::format(
       "/api/v6/stoptimes?stopId=test_stop-2&time={}T11:00:00Z&arriveBy=true&n=1"
@@ -522,6 +529,7 @@ TEST(motis_rt_update, merges_disjoint_provider_events_for_the_same_trip) {
   ASSERT_EQ(arrival.predictionDebug_->size(), 1U);
   ASSERT_TRUE(arrival.predictionDebug_->front().provider_.has_value());
   EXPECT_EQ(arrival.predictionDebug_->front().provider_->delaySeconds_, 122);
+  EXPECT_EQ(arrival.predictionDebug_->front().provider_->referenceTime_, 200);
 }
 
 TEST(motis_rt_update,
@@ -757,6 +765,11 @@ TEST_P(realtime_ingestion_test,
   EXPECT_EQ(metric_total(metrics, "nigiri_gtfsrt_total_entities_total{"), 2.0);
   EXPECT_EQ(metric_total(metrics, "nigiri_gtfsrt_updates_successful_total{"),
             2.0);
+  EXPECT_EQ(
+      metric_total(
+          metrics,
+          "motis_rt_cycle_workload{kind=\"feed_apply_timetable_clones\"}"),
+      1.0);
 }
 
 INSTANTIATE_TEST_SUITE_P(full_and_incremental,
@@ -781,8 +794,8 @@ TEST(motis_rt_update,
           .first_day_ = first_day,
           .num_days_ = 2,
           .update_interval_ = 1,
-          .incremental_rt_update_ = true,
           .canned_rt_ = true,
+          .incremental_rt_update_ = true,
           .datasets_ = {{"test",
                          {.path_ = gtfs,
                           .rt_ = {{{.url_ = "https://example.test/trip_updates",
@@ -928,8 +941,8 @@ TEST(motis_rt_update, fresh_last_good_survives_bad_cycle_and_expires) {
           .first_day_ = first_day,
           .num_days_ = 2,
           .update_interval_ = 1,
-          .incremental_rt_update_ = true,
           .canned_rt_ = true,
+          .incremental_rt_update_ = true,
           .datasets_ = {{"test",
                          {.path_ = gtfs,
                           .rt_ = {{{.url_ = "https://example.test/trip_updates",
@@ -1123,8 +1136,8 @@ TEST(motis_rt_update,
           .first_day_ = first_day,
           .num_days_ = 2,
           .update_interval_ = 1,
-          .incremental_rt_update_ = true,
           .canned_rt_ = true,
+          .incremental_rt_update_ = true,
           .datasets_ = {{"test",
                          {.path_ = gtfs,
                           .rt_ = {{{.url_ = "https://example.test/first",
@@ -1197,8 +1210,8 @@ TEST(motis_rt_update,
           .first_day_ = service_day,
           .num_days_ = 2,
           .update_interval_ = 1,
-          .incremental_rt_update_ = true,
           .canned_rt_ = true,
+          .incremental_rt_update_ = true,
           .datasets_ = {
               {"test",
                {.path_ = gtfs,
@@ -1334,8 +1347,8 @@ service-1,1,1,1,1,1,1,1,{},{}
           .first_day_ = service_day,
           .num_days_ = 3,
           .update_interval_ = 1,
-          .incremental_rt_update_ = true,
           .canned_rt_ = true,
+          .incremental_rt_update_ = true,
           .datasets_ = {
               {"test",
                {.path_ = gtfs,

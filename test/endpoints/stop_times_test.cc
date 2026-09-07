@@ -213,13 +213,13 @@ TEST(motis, stop_times) {
                       .predicted_timestamp_seconds_ = scheduled + 420,
                       .delay_seconds_ = 420,
                       .confidence_ = 0.8},
-              .latest_vehicle_observation_timestamp_seconds_ = scheduled - 15,
               .effective_ = {.source_ = vehicle_prediction_source::kProvider,
                              .predicted_timestamp_seconds_ = scheduled + 600,
                              .delay_seconds_ = 600},
               .selected_source_ = vehicle_prediction_source::kGps,
               .selection_reason_ = vehicle_prediction_selection_reason::
                   kProviderProgressInconsistent,
+              .latest_vehicle_observation_timestamp_seconds_ = scheduled - 15,
               .context_ = vehicle_prediction_context::kIncomingBlockLeg}},
             scheduled);
 

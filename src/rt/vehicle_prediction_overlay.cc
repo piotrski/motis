@@ -253,7 +253,9 @@ void apply_prepared_trip(n::timetable const& tt,
   if (rt_transport == n::rt_transport_idx_t::invalid()) {
     rt_transport = rtt.add_rt_transport(trip.source_, tt, trip.transport_);
   }
-  auto const run = n::rt::run{.t_ = trip.transport_, .rt_ = rt_transport};
+  auto const run = n::rt::run{.t_ = trip.transport_,
+                              .stop_range_ = prepared.range_,
+                              .rt_ = rt_transport};
   for (auto const& update : prepared.updates_) {
     auto const stop_idx = absolute_stop(prepared, update);
     rtt.update_time(rt_transport, stop_idx, update.event_type_, update.time_);

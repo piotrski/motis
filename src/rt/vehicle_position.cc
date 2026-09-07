@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <unordered_set>
 
 #include "gtfsrt/gtfs-realtime.pb.h"
 
@@ -154,27 +155,44 @@ void vehicle_position_store::replace_feed(
   for (auto& pos : positions) {
     pos.feed_id_ = feed_id;
   }
+  auto incoming_entity_ids = std::unordered_set<std::string_view>{};
+  auto incoming_vehicle_ids = std::unordered_set<std::string_view>{};
+  incoming_entity_ids.reserve(positions.size());
+  incoming_vehicle_ids.reserve(positions.size());
+  for (auto const& pos : positions) {
+    incoming_entity_ids.emplace(pos.entity_id_);
+    if (pos.vehicle_.id_.has_value()) {
+      incoming_vehicle_ids.emplace(*pos.vehicle_.id_);
+    }
+  }
 
   auto retained = std::vector<vehicle_position>{};
+  auto superseded_entity_ids = std::unordered_set<std::string_view>{};
   for (auto const& existing : positions_) {
-    if (existing.feed_id_ != feed_id ||
-        std::ranges::find(positions, existing.entity_id_,
-                          &vehicle_position::entity_id_) != end(positions)) {
+    if (existing.feed_id_ != feed_id) {
+      continue;
+    }
+    auto const superseded = existing.vehicle_.id_.has_value() &&
+                            incoming_vehicle_ids.contains(*existing.vehicle_.id_);
+    if (incoming_entity_ids.contains(existing.entity_id_) || superseded) {
+      if (superseded) {
+        superseded_entity_ids.emplace(existing.entity_id_);
+      }
       continue;
     }
     auto const key = std::pair{existing.feed_id_, existing.entity_id_};
     auto const missed = std::ranges::find(missed_full_snapshot_once_, key);
     if (missed == end(missed_full_snapshot_once_)) {
       retained.emplace_back(existing);
-      missed_full_snapshot_once_.emplace_back(key);
+      missed_full_snapshot_once_.emplace(key);
     } else {
       missed_full_snapshot_once_.erase(missed);
     }
   }
   std::erase_if(missed_full_snapshot_once_, [&](auto const& key) {
     return key.first == feed_id &&
-           std::ranges::find(positions, key.second,
-                             &vehicle_position::entity_id_) != end(positions);
+           (incoming_entity_ids.contains(key.second) ||
+            superseded_entity_ids.contains(key.second));
   });
 
   std::erase_if(positions_, [&](vehicle_position const& pos) {

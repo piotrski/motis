@@ -238,6 +238,8 @@ data::data(std::filesystem::path p, config const& c)
                       .view(),
             *new_rtt);
         rt_->rtt_ = std::move(new_rtt);
+        rt_->provider_rtt_ =
+            std::make_unique<n::rt_timetable>(*rt_->rtt_);
       }
     }
   });

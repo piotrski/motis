@@ -64,6 +64,12 @@ api::VehiclePosition to_api(vehicle_positions::vehicle_position const&,
 
 std::int64_t freshness_cutoff(std::int64_t now, std::int64_t max_age);
 
+std::int64_t default_max_age(unsigned update_interval_seconds);
+
+std::int64_t vehicle_position_retention_seconds(
+    unsigned update_interval_seconds,
+    std::optional<std::int64_t> eta_history_max_age_seconds);
+
 bool is_fresh(vehicle_positions::vehicle_position const&,
               std::int64_t cutoff,
               std::int64_t now);

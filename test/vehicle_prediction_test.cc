@@ -224,6 +224,22 @@ TEST(vehicle_prediction, observation_age_does_not_shift_moving_eta) {
             after_feed_pause.predictions_.front().predicted_timestamp_seconds_);
 }
 
+TEST(vehicle_prediction, clamps_tolerated_future_observation_to_cycle_time) {
+  auto fixture = prediction_fixture{};
+  auto const now = fixture.next_scheduled() - 50;
+  auto prior = fixture.observation(8.004, now + 20);
+  prior.ingested_time_ = now - 10;
+  auto future = fixture.observation(8.005, now + 30);
+  future.ingested_time_ = now;
+  auto const observations = std::vector<vehicle_observation>{prior, future};
+  auto engine = vehicle_prediction_engine{*fixture.data_->shapes_};
+
+  auto const result = engine.evaluate(fixture.run(), observations, now);
+
+  ASSERT_TRUE(result.eligible());
+  EXPECT_EQ(result.candidate_reference_timestamp_seconds_, now);
+}
+
 TEST(vehicle_prediction, finds_shape_for_interlined_trip) {
   auto fixture = prediction_fixture{};
   auto const run = fixture.run("continuation", "01:10");

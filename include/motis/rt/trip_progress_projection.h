@@ -55,7 +55,7 @@ struct trip_progress {
 struct trip_progress_projection {
   trip_progress_projection_status status_{
       trip_progress_projection_status::kMissingShape};
-  std::optional<trip_progress> progress_;
+  std::optional<trip_progress> progress_{};
 };
 
 struct trip_progress_stop {

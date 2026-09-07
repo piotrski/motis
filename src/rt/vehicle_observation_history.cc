@@ -426,6 +426,14 @@ std::span<vehicle_observation const> vehicle_observation_history::observations(
              : std::span<vehicle_observation const>{it->second.observations_};
 }
 
+std::span<vehicle_observation const> vehicle_observation_history::observations(
+    vehicle_key const& key, vehicle_trip_instance const& trip) const {
+  auto const it = histories_.find(key);
+  return it == end(histories_) || it->second.trip_ != trip
+             ? std::span<vehicle_observation const>{}
+             : std::span<vehicle_observation const>{it->second.observations_};
+}
+
 vehicle_observation const* vehicle_observation_history::effective_observation(
     vehicle_key const& key) const {
   auto const history = observations(key);

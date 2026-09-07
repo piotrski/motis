@@ -29,18 +29,18 @@ struct vehicle_position_store;
 }
 
 struct vehicle_prediction_cycle_result {
-  std::string feed_;
-  std::string trip_id_;
-  std::optional<nigiri::clasz> mode_;
-  std::optional<nigiri::interval<nigiri::stop_idx_t>> trip_stop_range_;
+  std::string feed_{};
+  std::string trip_id_{};
+  std::optional<nigiri::clasz> mode_{};
+  std::optional<nigiri::interval<nigiri::stop_idx_t>> trip_stop_range_{};
   vehicle_prediction_context context_{vehicle_prediction_context::kDirect};
-  std::optional<incoming_leg_prediction_provenance> incoming_leg_provenance_;
-  std::optional<std::int64_t> latest_vehicle_observation_timestamp_seconds_;
-  vehicle_prediction_batch batch_;
-  std::vector<vehicle_stop_prediction> provider_predictions_;
-  std::optional<std::int64_t> provider_reference_timestamp_seconds_;
-  std::vector<std::int64_t> provider_raw_error_seconds_;
-  std::vector<std::int64_t> provider_minute_error_;
+  std::optional<incoming_leg_prediction_provenance> incoming_leg_provenance_{};
+  std::optional<std::int64_t> latest_vehicle_observation_timestamp_seconds_{};
+  vehicle_prediction_batch batch_{};
+  std::vector<vehicle_stop_prediction> provider_predictions_{};
+  std::optional<std::int64_t> provider_reference_timestamp_seconds_{};
+  std::vector<std::int64_t> provider_raw_error_seconds_{};
+  std::vector<std::int64_t> provider_minute_error_{};
 };
 
 // Runs candidate generation after provider application, against the private

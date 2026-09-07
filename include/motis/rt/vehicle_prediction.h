@@ -58,6 +58,7 @@ struct vehicle_stop_prediction {
   std::int64_t predicted_timestamp_seconds_{};
   std::int64_t delay_seconds_{};
   std::int64_t horizon_seconds_{};
+  std::optional<std::int64_t> reference_timestamp_seconds_{};
 };
 
 struct observed_stop_passage {
@@ -73,7 +74,7 @@ struct vehicle_prediction_stop_event {
 };
 
 struct vehicle_prediction_diagnostics {
-  std::optional<vehicle_prediction_rejection_reason> rejection_;
+  std::optional<vehicle_prediction_rejection_reason> rejection_{};
   std::size_t fresh_observation_count_{};
   std::size_t uncertain_passage_count_{};
 };
@@ -81,17 +82,17 @@ struct vehicle_prediction_diagnostics {
 struct vehicle_prediction_batch {
   // V1 candidates are always keyed by the exact scheduled trip instance.
   nigiri::transport transport_{nigiri::transport::invalid()};
-  std::optional<unsigned> delay_anchor_static_stop_sequence_;
-  std::optional<std::int64_t> delay_anchor_seconds_;
-  std::optional<std::int64_t> candidate_reference_timestamp_seconds_;
-  std::optional<double> implied_progress_m_;
-  std::vector<vehicle_stop_prediction> predictions_;
+  std::optional<unsigned> delay_anchor_static_stop_sequence_{};
+  std::optional<std::int64_t> delay_anchor_seconds_{};
+  std::optional<std::int64_t> candidate_reference_timestamp_seconds_{};
+  std::optional<double> implied_progress_m_{};
+  std::vector<vehicle_stop_prediction> predictions_{};
   // Retained even when ETA estimation is rejected so debug consumers can
   // associate the rejection with exact scheduled stop-time events.
-  std::vector<vehicle_prediction_stop_event> diagnostic_events_;
-  std::vector<observed_stop_passage> observed_passages_;
-  std::optional<vehicle_prediction_confidence> confidence_;
-  vehicle_prediction_diagnostics diagnostics_;
+  std::vector<vehicle_prediction_stop_event> diagnostic_events_{};
+  std::vector<observed_stop_passage> observed_passages_{};
+  std::optional<vehicle_prediction_confidence> confidence_{};
+  vehicle_prediction_diagnostics diagnostics_{};
 
   [[nodiscard]] bool eligible() const {
     return !diagnostics_.rejection_.has_value() && !predictions_.empty();

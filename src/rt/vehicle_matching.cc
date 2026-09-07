@@ -1,6 +1,7 @@
 #include "motis/rt/vehicle_matching.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <limits>
 #include <string>
@@ -119,9 +120,13 @@ std::optional<n::route_id_idx_t> find_route_id(
     if (static_route_id.size() <= best_len) {
       continue;
     }
-    if (realtime_route_id == static_route_id ||
-        (static_route_id.size() < realtime_route_id.size() &&
-         realtime_route_id.ends_with(static_route_id))) {
+    auto const namespace_suffix =
+        static_route_id.size() < realtime_route_id.size() &&
+        realtime_route_id.ends_with(static_route_id) &&
+        !std::isalnum(static_cast<unsigned char>(
+            realtime_route_id[realtime_route_id.size() - static_route_id.size() -
+                              1U]));
+    if (realtime_route_id == static_route_id || namespace_suffix) {
       best = route_id;
       best_len = static_route_id.size();
     }
@@ -431,6 +436,20 @@ std::int64_t freshness_cutoff(std::int64_t const now,
   return now < kMin + max_age ? kMin : now - max_age;
 }
 
+std::int64_t default_max_age(unsigned const update_interval_seconds) {
+  return std::max<std::int64_t>(
+      60, 3 * static_cast<std::int64_t>(update_interval_seconds));
+}
+
+std::int64_t vehicle_position_retention_seconds(
+    unsigned const update_interval_seconds,
+    std::optional<std::int64_t> const eta_history_max_age_seconds) {
+  return eta_history_max_age_seconds.has_value()
+             ? std::max(default_max_age(update_interval_seconds),
+                        *eta_history_max_age_seconds)
+             : default_max_age(update_interval_seconds);
+}
+
 namespace {
 
 std::int64_t freshness_ceiling(std::int64_t const now) {
@@ -470,6 +489,33 @@ bool matches_service_day(tag_lookup const& tags,
          target_id[vehicle.trip_.start_date_->size()] == '_';
 }
 
+bool can_match_target_trip(tag_lookup const& tags,
+                           n::timetable const& tt,
+                           n::rt::frun const& target,
+                           std::string_view const target_route,
+                           vehicle_positions::vehicle_position const& vehicle) {
+  auto const source = tags.get_src(dataset_tag(vehicle.feed_id_));
+  if (source == n::source_idx_t::invalid()) {
+    return false;
+  }
+  auto const target_ids = tt.trip_ids_[target.trip_idx()];
+  auto const source_matches = std::ranges::any_of(
+      target_ids, [&](n::trip_id_idx_t const id) {
+        return tt.trip_id_src_[id] == source;
+      });
+  if (!source_matches) {
+    return false;
+  }
+  if (vehicle.trip_.trip_id_.has_value()) {
+    return std::ranges::any_of(target_ids, [&](n::trip_id_idx_t const id) {
+      return tt.trip_id_src_[id] == source &&
+             tt.trip_id_strings_[id].view() == *vehicle.trip_.trip_id_;
+    });
+  }
+  return vehicle.trip_.route_id_.has_value() &&
+         *vehicle.trip_.route_id_ == target_route;
+}
+
 std::optional<api::VehiclePosition> primary_vehicle(
     tag_lookup const& tags,
     n::timetable const& tt,
@@ -486,7 +532,8 @@ std::optional<api::VehiclePosition> primary_vehicle(
   auto const target_direction = first.get_direction_id(n::event_type::kDep);
 
   for (auto const& vehicle : store.all()) {
-    if (!is_fresh(vehicle, freshness_cutoff, now)) {
+    if (!is_fresh(vehicle, freshness_cutoff, now) ||
+        !can_match_target_trip(tags, tt, target, target_route, vehicle)) {
       continue;
     }
     auto exact_trip_match = false;

@@ -24,42 +24,42 @@ namespace motis {
 
 struct scheduled_provider_stop {
   unsigned static_stop_sequence_{};
-  std::string stop_id_;
-  std::optional<std::int64_t> arrival_timestamp_seconds_;
-  std::optional<std::int64_t> departure_timestamp_seconds_;
-  std::optional<std::int64_t> effective_arrival_timestamp_seconds_;
-  std::optional<std::int64_t> effective_departure_timestamp_seconds_;
+  std::string stop_id_{};
+  std::optional<std::int64_t> arrival_timestamp_seconds_{};
+  std::optional<std::int64_t> departure_timestamp_seconds_{};
+  std::optional<std::int64_t> effective_arrival_timestamp_seconds_{};
+  std::optional<std::int64_t> effective_departure_timestamp_seconds_{};
 };
 
 struct resolved_provider_trip {
   nigiri::transport transport_{nigiri::transport::invalid()};
   nigiri::interval<nigiri::stop_idx_t> trip_stop_range_{};
-  std::vector<scheduled_provider_stop> stops_;
-  std::string trip_id_;
-  std::optional<nigiri::clasz> mode_;
+  std::vector<scheduled_provider_stop> stops_{};
+  std::string trip_id_{};
+  std::optional<nigiri::clasz> mode_{};
 };
 
 struct provider_stop_timing {
   unsigned static_stop_sequence_{};
-  std::optional<std::int64_t> arrival_timestamp_seconds_;
-  std::optional<std::int64_t> departure_timestamp_seconds_;
-  std::optional<std::int64_t> arrival_delay_seconds_;
-  std::optional<std::int64_t> departure_delay_seconds_;
+  std::optional<std::int64_t> arrival_timestamp_seconds_{};
+  std::optional<std::int64_t> departure_timestamp_seconds_{};
+  std::optional<std::int64_t> arrival_delay_seconds_{};
+  std::optional<std::int64_t> departure_delay_seconds_{};
 };
 
 struct provider_timing_candidate {
   nigiri::transport transport_{nigiri::transport::invalid()};
   nigiri::interval<nigiri::stop_idx_t> trip_stop_range_{};
-  std::optional<std::int64_t> feed_timestamp_seconds_;
-  std::optional<std::int64_t> trip_update_timestamp_seconds_;
-  std::vector<provider_stop_timing> stops_;
-  std::string trip_id_;
-  std::optional<nigiri::clasz> mode_;
-  std::vector<scheduled_provider_stop> resolved_stops_;
+  std::optional<std::int64_t> feed_timestamp_seconds_{};
+  std::optional<std::int64_t> trip_update_timestamp_seconds_{};
+  std::vector<provider_stop_timing> stops_{};
+  std::string trip_id_{};
+  std::optional<nigiri::clasz> mode_{};
+  std::vector<scheduled_provider_stop> resolved_stops_{};
 };
 
 struct provider_timing_extraction {
-  std::vector<provider_timing_candidate> candidates_;
+  std::vector<provider_timing_candidate> candidates_{};
   std::size_t operational_only_trip_updates_{};
   std::size_t unresolved_trip_updates_{};
 };
@@ -106,8 +106,8 @@ struct timing_source_candidate {
   std::int64_t reference_timestamp_seconds_{};
   double confidence_{};
   bool physically_reachable_{false};
-  std::optional<double> implied_progress_m_;
-  std::vector<vehicle_stop_prediction> predictions_;
+  std::optional<double> implied_progress_m_{};
+  std::vector<vehicle_stop_prediction> predictions_{};
 };
 
 struct vehicle_prediction_selector_policy {
@@ -127,8 +127,8 @@ struct vehicle_prediction_selector_policy {
 struct vehicle_prediction_selection_input {
   nigiri::transport transport_{nigiri::transport::invalid()};
   std::int64_t now_seconds_{};
-  std::optional<timing_source_candidate> provider_;
-  std::optional<timing_source_candidate> gps_;
+  std::optional<timing_source_candidate> provider_{};
+  std::optional<timing_source_candidate> gps_{};
 };
 
 struct vehicle_prediction_selection_diagnostics {
@@ -138,24 +138,24 @@ struct vehicle_prediction_selection_diagnostics {
     std::int64_t rendered_delay_minutes_{};
   };
 
-  std::optional<timing_candidate_rejection_reason> provider_rejection_;
-  std::optional<timing_candidate_rejection_reason> gps_rejection_;
-  std::optional<std::int64_t> candidate_timestamp_skew_seconds_;
-  std::optional<double> progress_difference_m_;
-  std::optional<double> selected_confidence_;
+  std::optional<timing_candidate_rejection_reason> provider_rejection_{};
+  std::optional<timing_candidate_rejection_reason> gps_rejection_{};
+  std::optional<std::int64_t> candidate_timestamp_skew_seconds_{};
+  std::optional<double> progress_difference_m_{};
+  std::optional<double> selected_confidence_{};
   bool source_transition_{false};
   bool provider_recovery_{false};
   bool flap_{false};
   unsigned provider_consistent_cycles_{};
-  std::vector<rendered_stop_delay> rendered_delays_;
+  std::vector<rendered_stop_delay> rendered_delays_{};
 };
 
 struct vehicle_prediction_selection {
   vehicle_prediction_source source_{vehicle_prediction_source::kSchedule};
   vehicle_prediction_selection_reason reason_{
       vehicle_prediction_selection_reason::kNoUsableCandidate};
-  std::vector<vehicle_stop_prediction> predictions_;
-  vehicle_prediction_selection_diagnostics diagnostics_;
+  std::vector<vehicle_stop_prediction> predictions_{};
+  vehicle_prediction_selection_diagnostics diagnostics_{};
 };
 
 [[nodiscard]] vehicle_prediction_selection select_vehicle_prediction_source(
@@ -167,10 +167,10 @@ struct vehicle_prediction_selection_state {
     nigiri::transport transport_{nigiri::transport::invalid()};
     vehicle_prediction_source selected_{vehicle_prediction_source::kSchedule};
     std::int64_t last_seen_seconds_{};
-    std::optional<std::int64_t> last_transition_seconds_;
+    std::optional<std::int64_t> last_transition_seconds_{};
     unsigned provider_consistent_cycles_{};
     bool provider_rejected_{false};
-    std::vector<std::pair<unsigned, std::int64_t>> rendered_minutes_;
+    std::vector<std::pair<unsigned, std::int64_t>> rendered_minutes_{};
   };
 
   [[nodiscard]] vehicle_prediction_selection select(
@@ -196,9 +196,9 @@ private:
 struct config;
 
 struct vehicle_prediction_shadow_request {
-  std::string feed_;
+  std::string feed_{};
   nigiri::clasz mode_{nigiri::clasz::kOther};
-  vehicle_prediction_selection_input selection_;
+  vehicle_prediction_selection_input selection_{};
   bool completed_{false};
 };
 
@@ -207,7 +207,7 @@ using vehicle_prediction_selector_policy_resolver =
         std::string_view, nigiri::clasz)>;
 
 struct vehicle_prediction_shadow_summary {
-  std::string feed_;
+  std::string feed_{};
   nigiri::clasz mode_{nigiri::clasz::kOther};
   std::size_t evaluated_{};
   std::size_t provider_selected_{};
@@ -222,8 +222,8 @@ struct vehicle_prediction_shadow_summary {
 };
 
 struct vehicle_prediction_shadow_cycle_result {
-  std::vector<vehicle_prediction_selection> selections_;
-  std::vector<vehicle_prediction_shadow_summary> summaries_;
+  std::vector<vehicle_prediction_selection> selections_{};
+  std::vector<vehicle_prediction_shadow_summary> summaries_{};
 };
 
 // Shadow evaluation owns no provider message and cannot affect API responses.

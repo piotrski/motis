@@ -88,6 +88,23 @@ TEST(vehicle_observation_history,
   EXPECT_EQ(observation_time(values.front()), 110);
 }
 
+TEST(vehicle_observation_history, returns_observations_only_for_matching_trip) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(
+      observation(100, 100, "entity", "vehicle", "current-trip"), kPolicy));
+
+  EXPECT_FALSE(history
+                   .observations(descriptor_key(),
+                                 {.trip_id_ = "current-trip",
+                                  .start_date_ = "20260731"})
+                   .empty());
+  EXPECT_TRUE(history
+                  .observations(descriptor_key(),
+                                {.trip_id_ = "departed-trip",
+                                 .start_date_ = "20260731"})
+                  .empty());
+}
+
 TEST(vehicle_observation_history,
      deduplicates_repeated_reports_without_refreshing_their_age) {
   auto history = vehicle_observation_history{};

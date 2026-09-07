@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -19,14 +20,19 @@ class vehicle_eta_calibration {
 public:
   struct limits {
     std::uintmax_t max_file_bytes_{10U * 1024U * 1024U};
+    std::uintmax_t max_pending_bytes_{1024U * 1024U};
     std::int64_t retention_seconds_{7 * 24 * 60 * 60};
   };
 
   struct ingest_result {
     std::size_t pending_entries_{};
     std::size_t completed_entries_{};
-    std::size_t appended_records_{};
-    std::uintmax_t appended_bytes_{};
+    std::size_t queued_records_{};
+    std::uintmax_t queued_bytes_{};
+    std::size_t dropped_records_{};
+    std::uintmax_t dropped_bytes_{};
+    std::size_t persistence_failed_records_{};
+    std::uintmax_t persistence_failed_bytes_{};
   };
 
   explicit vehicle_eta_calibration(std::filesystem::path directory);
@@ -38,6 +44,8 @@ public:
       std::int64_t now_seconds,
       std::int64_t update_interval_seconds);
 
+  void flush() const;
+
   // Report aggregation is intentionally explicit: it reads all retained
   // calibration records and must not run on the realtime publication path.
   void generate_report() const;
@@ -47,6 +55,7 @@ public:
       std::filesystem::path const&);
 
 private:
+  struct persistence;
   struct forecast {
     std::string feed_;
     std::string trip_id_;
@@ -59,13 +68,8 @@ private:
     std::optional<std::int64_t> provider_seconds_;
   };
 
-  [[nodiscard]] std::uintmax_t append(std::span<boost::json::object const>,
-                                      std::int64_t now_seconds);
-  void rotate_and_prune(std::int64_t now_seconds,
-                        std::uintmax_t incoming_bytes);
-
   std::filesystem::path directory_;
-  limits limits_;
+  std::unique_ptr<persistence> persistence_;
   std::map<std::string, forecast> forecasts_;
   std::map<std::string, std::int64_t> completed_;
 };

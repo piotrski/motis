@@ -309,6 +309,13 @@ prediction_candidate_diagnostic provider_diagnostic(
     vehicle_stop_prediction const&,
     std::optional<std::int64_t> reference_timestamp);
 
+std::optional<std::int64_t> provider_reference_timestamp(
+    vehicle_prediction_cycle_result const& candidate,
+    vehicle_stop_prediction const& prediction) {
+  return prediction.reference_timestamp_seconds_.or_else(
+      [&] { return candidate.provider_reference_timestamp_seconds_; });
+}
+
 struct selected_cycle_prediction {
   vehicle_prediction_cycle_result const* candidate_{};
   vehicle_prediction_selection selection_;
@@ -394,15 +401,11 @@ std::vector<selected_cycle_prediction> select_cycle_predictions(
 std::unique_ptr<vehicle_prediction_diagnostics_store>
 build_vehicle_prediction_diagnostics(
     config const& c,
-    vehicle_eta_runtime_control const& runtime_control,
     std::span<vehicle_prediction_cycle_result const> const candidates,
     std::span<selected_cycle_prediction const> const selections,
     std::span<nigiri::transport const> const applied_transports,
     vehicle_prediction_overlay_state const& overlay_state,
     std::int64_t const now_seconds) {
-  if (!runtime_control.enabled(c)) {
-    return nullptr;
-  }
   auto entries = std::vector<vehicle_prediction_diagnostic_entry>{};
   for (auto const& candidate : candidates) {
     auto const& batch = candidate.batch_;
@@ -414,7 +417,7 @@ build_vehicle_prediction_diagnostics(
     }
     for (auto const& provider : candidate.provider_predictions_) {
       auto const provider_value = provider_diagnostic(
-          provider, candidate.provider_reference_timestamp_seconds_);
+          provider, provider_reference_timestamp(candidate, provider));
       entries.push_back(
           {.transport_ = batch.transport_,
            .static_stop_sequence_ = provider.static_stop_sequence_,
@@ -475,21 +478,24 @@ build_vehicle_prediction_diagnostics(
     auto const overlay_applied =
         selection.source_ != vehicle_prediction_source::kGps ||
         std::ranges::binary_search(applied_transports, batch.transport_);
+    auto const same_event = [](vehicle_stop_prediction const& left,
+                               vehicle_stop_prediction const& right) {
+      return left.static_stop_sequence_ == right.static_stop_sequence_ &&
+             left.event_type_ == right.event_type_ &&
+             left.scheduled_timestamp_seconds_ ==
+                 right.scheduled_timestamp_seconds_;
+    };
     for (auto const& gps : batch.predictions_) {
       auto const provider = std::ranges::find_if(
-          source.provider_predictions_, [&](vehicle_stop_prediction const& x) {
-            return x.static_stop_sequence_ == gps.static_stop_sequence_ &&
-                   x.event_type_ == gps.event_type_ &&
-                   x.scheduled_timestamp_seconds_ ==
-                       gps.scheduled_timestamp_seconds_;
-          });
+          source.provider_predictions_,
+          [&](vehicle_stop_prediction const& x) { return same_event(x, gps); });
       auto effective = prediction_candidate_diagnostic{
           .source_ = vehicle_prediction_source::kSchedule,
           .predicted_timestamp_seconds_ = gps.scheduled_timestamp_seconds_};
       auto provider_value = std::optional<prediction_candidate_diagnostic>{};
       if (provider != end(source.provider_predictions_)) {
         provider_value = provider_diagnostic(
-            *provider, source.provider_reference_timestamp_seconds_);
+            *provider, provider_reference_timestamp(source, *provider));
         effective = *provider_value;
       }
       auto const gps_diagnostic = prediction_candidate_diagnostic{
@@ -562,8 +568,37 @@ build_vehicle_prediction_diagnostics(
            .provider_consistent_cycles_ =
                selection.diagnostics_.provider_consistent_cycles_});
     }
+    for (auto const& provider : source.provider_predictions_) {
+      if (std::ranges::any_of(batch.predictions_, [&](auto const& gps) {
+            return same_event(provider, gps);
+          })) {
+        continue;
+      }
+      auto const provider_value = provider_diagnostic(
+          provider, provider_reference_timestamp(source, provider));
+      entries.push_back(
+          {.transport_ = batch.transport_,
+           .static_stop_sequence_ = provider.static_stop_sequence_,
+           .event_type_ = provider.event_type_,
+           .trip_id_ = source.trip_id_,
+           .trip_stop_range_ = source.trip_stop_range_,
+           .observed_at_seconds_ = now_seconds,
+           .scheduled_timestamp_seconds_ =
+               provider.scheduled_timestamp_seconds_,
+           .provider_ = provider_value,
+           .effective_ = provider_value,
+           .selected_source_ = vehicle_prediction_source::kProvider,
+           .selection_reason_ =
+               vehicle_prediction_selection_reason::kProviderOnly,
+           .latest_vehicle_observation_timestamp_seconds_ =
+               source.latest_vehicle_observation_timestamp_seconds_});
+    }
   }
-  auto const max_age = c.timetable_->vehicle_eta_->history_.max_age_seconds_;
+  auto const max_age = vehicle_matching::vehicle_position_retention_seconds(
+      c.timetable_->update_interval_,
+      c.timetable_->vehicle_eta_.transform([](auto const& eta) {
+        return eta.history_.max_age_seconds_;
+      }));
   return vehicle_prediction_diagnostics_store::build(
       true, std::move(entries), now_seconds,
       {.max_age_seconds_ = max_age, .max_entries_ = 100'000U});
@@ -629,26 +664,19 @@ std::optional<resolved_provider_trip> resolve_provider_trip(
 }
 
 std::vector<vehicle_prediction_cycle_result> provider_prediction_candidates(
-    config const& c,
-    vehicle_eta_runtime_control const& runtime_control,
     data const& d,
     date::sys_days const today,
     gtfs_rt_endpoint const& endpoint,
     transit_realtime::FeedMessage const& message,
     n::rt_timetable const& staged,
     std::int64_t const observed_at) {
-  if (!runtime_control.enabled(c)) {
-    return {};
-  }
   auto const extracted = extract_provider_timing(
       message, [&](transit_realtime::TripDescriptor const& descriptor) {
         return resolve_provider_trip(d, today, endpoint, staged, descriptor);
       });
   auto results = std::vector<vehicle_prediction_cycle_result>{};
   for (auto const& provider : extracted.candidates_) {
-    if (!provider.mode_.has_value() ||
-        runtime_control.resolve(c, endpoint.tag_, *provider.mode_) ==
-            config::timetable::vehicle_eta::mode::off) {
+    if (!provider.mode_.has_value()) {
       continue;
     }
     auto result = vehicle_prediction_cycle_result{
@@ -690,7 +718,9 @@ std::vector<vehicle_prediction_cycle_result> provider_prediction_candidates(
            .scheduled_timestamp_seconds_ = *scheduled,
            .predicted_timestamp_seconds_ = *predicted,
            .delay_seconds_ = *delay,
-           .horizon_seconds_ = *horizon});
+           .horizon_seconds_ = *horizon,
+           .reference_timestamp_seconds_ =
+               result.provider_reference_timestamp_seconds_});
     };
     for (auto const& stop : provider.stops_) {
       auto const resolved = std::ranges::find(
@@ -708,11 +738,96 @@ std::vector<vehicle_prediction_cycle_result> provider_prediction_candidates(
                 resolved->departure_timestamp_seconds_,
                 stop.departure_timestamp_seconds_);
     }
+    auto propagated_delay = std::optional<std::int64_t>{};
+    auto const add_propagated_event =
+        [&](scheduled_provider_stop const& stop,
+            vehicle_prediction_event_type const event_type,
+            std::optional<std::int64_t> const scheduled,
+            std::optional<std::int64_t> const effective) {
+          auto const explicit_prediction = std::ranges::find_if(
+              result.provider_predictions_,
+              [&](vehicle_stop_prediction const& prediction) {
+                return prediction.static_stop_sequence_ ==
+                           stop.static_stop_sequence_ &&
+                       prediction.event_type_ == event_type;
+              });
+          if (explicit_prediction != end(result.provider_predictions_)) {
+            propagated_delay = explicit_prediction->delay_seconds_;
+          } else if (propagated_delay && scheduled && effective &&
+                     *effective != *scheduled) {
+            add_event(stop.static_stop_sequence_, event_type, scheduled,
+                      *scheduled + *propagated_delay);
+          }
+        };
+    for (auto const& stop : provider.resolved_stops_) {
+      add_propagated_event(stop, vehicle_prediction_event_type::kArrival,
+                           stop.arrival_timestamp_seconds_,
+                           stop.effective_arrival_timestamp_seconds_);
+      add_propagated_event(stop, vehicle_prediction_event_type::kDeparture,
+                           stop.departure_timestamp_seconds_,
+                           stop.effective_departure_timestamp_seconds_);
+    }
     if (!result.provider_predictions_.empty()) {
       results.emplace_back(std::move(result));
     }
   }
   return results;
+}
+
+void merge_provider_predictions(vehicle_prediction_cycle_result& existing,
+                                vehicle_prediction_cycle_result&& provider) {
+  for (auto& prediction : provider.provider_predictions_) {
+    if (!prediction.reference_timestamp_seconds_.has_value()) {
+      prediction.reference_timestamp_seconds_ =
+          provider.provider_reference_timestamp_seconds_;
+    }
+    auto const prior = std::ranges::find_if(
+        existing.provider_predictions_,
+        [&](vehicle_stop_prediction const& candidate) {
+          return candidate.static_stop_sequence_ ==
+                     prediction.static_stop_sequence_ &&
+                 candidate.event_type_ == prediction.event_type_;
+        });
+    if (prior == end(existing.provider_predictions_)) {
+      existing.provider_predictions_.emplace_back(std::move(prediction));
+    } else {
+      *prior = std::move(prediction);
+    }
+  }
+
+  auto const existing_reference =
+      existing.provider_reference_timestamp_seconds_;
+  existing.provider_reference_timestamp_seconds_.reset();
+  for (auto& prediction : existing.provider_predictions_) {
+    if (!prediction.reference_timestamp_seconds_.has_value()) {
+      prediction.reference_timestamp_seconds_ = existing_reference;
+    }
+    auto const reference = prediction.reference_timestamp_seconds_;
+    if (reference.has_value() &&
+        (!existing.provider_reference_timestamp_seconds_.has_value() ||
+         *reference < *existing.provider_reference_timestamp_seconds_)) {
+      existing.provider_reference_timestamp_seconds_ = reference;
+    }
+  }
+}
+
+std::vector<vehicle_prediction_cycle_result> merge_provider_candidates(
+    std::vector<vehicle_prediction_cycle_result> providers) {
+  auto merged = std::vector<vehicle_prediction_cycle_result>{};
+  merged.reserve(providers.size());
+  for (auto& provider : providers) {
+    auto const existing = std::ranges::find_if(
+        merged, [&](vehicle_prediction_cycle_result const& candidate) {
+          return candidate.batch_.transport_ == provider.batch_.transport_ &&
+                 candidate.trip_id_ == provider.trip_id_;
+        });
+    if (existing == end(merged)) {
+      merged.emplace_back(std::move(provider));
+      continue;
+    }
+    merge_provider_predictions(*existing, std::move(provider));
+  }
+  return merged;
 }
 
 void run_rt_update(boost::asio::io_context& ioc,
@@ -761,20 +876,26 @@ void run_rt_update(boost::asio::io_context& ioc,
                                     {{"phase", std::string{phase}}}));
           phase_values.emplace(phase, 0.0);
         }
-        constexpr auto kWorkloads = std::array{"endpoints",
-                                               "fetched_bytes",
-                                               "vehicles",
-                                               "history_observations",
-                                               "progress_diagnostics",
-                                               "provider_candidates",
-                                               "candidates",
-                                               "predicted_events",
-                                               "selected_overlays",
-                                               "calibration_enabled",
-                                               "calibration_pending",
-                                               "calibration_completed",
-                                               "calibration_appended_records",
-                                               "calibration_appended_bytes"};
+        constexpr auto kWorkloads =
+            std::array{"endpoints",
+                       "fetched_bytes",
+                       "vehicles",
+                       "history_observations",
+                       "progress_diagnostics",
+                       "provider_candidates",
+                       "candidates",
+                       "predicted_events",
+                       "selected_overlays",
+                       "feed_apply_timetable_clones",
+                       "calibration_enabled",
+                       "calibration_pending",
+                       "calibration_completed",
+                       "calibration_queued_records",
+                       "calibration_queued_bytes",
+                       "calibration_dropped_records",
+                       "calibration_dropped_bytes",
+                       "calibration_persistence_failed_records",
+                       "calibration_persistence_failed_bytes"};
         auto workload_metrics =
             std::map<std::string_view, prometheus::Gauge*>{};
         auto workload_values = std::map<std::string_view, std::size_t>{};
@@ -983,8 +1104,8 @@ void run_rt_update(boost::asio::io_context& ioc,
               bool source_success_{true};
             };
             struct collected_update {
-              std::optional<std::string> body_;
-              std::exception_ptr error_;
+              std::optional<std::string> body_{};
+              std::exception_ptr error_{};
             };
             struct prepared_gtfsrt_update {
               std::size_t endpoint_idx_;
@@ -1163,6 +1284,58 @@ void run_rt_update(boost::asio::io_context& ioc,
                 };
             auto provider_candidates =
                 std::vector<vehicle_prediction_cycle_result>{};
+            struct applied_gtfsrt_update {
+              std::size_t endpoint_idx_;
+              transit_realtime::FeedMessage msg_;
+            };
+            auto applied_gtfsrt_updates = std::vector<applied_gtfsrt_update>{};
+            auto provider_timetable_baseline =
+                std::unique_ptr<n::rt_timetable>{};
+            auto feed_apply_timetable_clones = std::size_t{0U};
+            auto const checkpoint_provider_timetable = [&]() {
+              provider_timetable_baseline =
+                  std::make_unique<n::rt_timetable>(*rtt);
+              ++feed_apply_timetable_clones;
+              applied_gtfsrt_updates.clear();
+            };
+            auto const apply_gtfsrt_timetable = [&](gtfs_rt_endpoint const& g,
+                                                    transit_realtime::
+                                                        FeedMessage const& msg,
+                                                    n::rt_timetable& target) {
+              auto const has_trip_updates = std::ranges::any_of(
+                  msg.entity(), &transit_realtime::FeedEntity::has_trip_update);
+              auto const has_vehicle_positions = std::ranges::any_of(
+                  msg.entity(), &transit_realtime::FeedEntity::has_vehicle);
+              auto const has_alerts = std::ranges::any_of(
+                  msg.entity(), &transit_realtime::FeedEntity::has_alert);
+              return has_trip_updates || has_alerts || !has_vehicle_positions
+                         ? n::rt::gtfsrt_update_msg(*d.tt_, target, g.src_,
+                                                    g.tag_, msg)
+                         : n::rt::statistics{
+                               .total_entities_ = msg.entity_size(),
+                               .total_entities_success_ = msg.entity_size(),
+                               .total_vehicles_ = static_cast<
+                                   int>(std::ranges::count_if(
+                                   msg.entity(),
+                                   &transit_realtime::FeedEntity::has_vehicle)),
+                               .feed_timestamp_ =
+                                   msg.has_header() &&
+                                           msg.header().has_timestamp()
+                                       ? date::sys_seconds{std::chrono::seconds{
+                                             msg.header().timestamp()}}
+                                       : date::sys_seconds{}};
+            };
+            auto const restore_provider_timetable = [&]() {
+              rtt = std::make_unique<n::rt_timetable>(
+                  *provider_timetable_baseline);
+              ++feed_apply_timetable_clones;
+              for (auto const& applied : applied_gtfsrt_updates) {
+                auto const& endpoint = std::get<gtfs_rt_endpoint>(
+                    endpoints[applied.endpoint_idx_]);
+                static_cast<void>(
+                    apply_gtfsrt_timetable(endpoint, applied.msg_, *rtt));
+              }
+            };
             auto const append_provider_candidates =
                 [&](gtfs_rt_endpoint const& g,
                     transit_realtime::FeedMessage const& msg,
@@ -1173,105 +1346,89 @@ void run_rt_update(boost::asio::io_context& ioc,
                           now.time_since_epoch())
                           .count());
                   auto extracted = provider_prediction_candidates(
-                      c, eta_control, d, today, g, msg, staged, observed_at);
+                      d, today, g, msg, staged, observed_at);
                   provider_candidates.insert(
                       end(provider_candidates),
                       std::make_move_iterator(begin(extracted)),
                       std::make_move_iterator(end(extracted)));
                 };
-            auto const apply_gtfsrt = [&](gtfs_rt_endpoint const& g,
-                                          prepared_gtfsrt_update const&
-                                              prepared,
-                                          transit_realtime::FeedMessage const&
-                                              msg,
-                                          bool const fallback) {
-              // GTFS-RT application mutates incrementally and can throw.
-              // Apply to a private copy so a failed primary or fallback
-              // cannot leak a partially changed timetable into this cycle.
-              auto staged = *rtt;
-              auto const has_trip_updates = std::ranges::any_of(
-                  msg.entity(), &transit_realtime::FeedEntity::has_trip_update);
-              auto const has_vehicle_positions = std::ranges::any_of(
-                  msg.entity(), &transit_realtime::FeedEntity::has_vehicle);
-              auto stats =
-                  has_trip_updates || !has_vehicle_positions
-                      ? n::rt::gtfsrt_update_msg(*d.tt_, staged, g.src_, g.tag_,
-                                                 msg)
-                      : n::rt::statistics{
-                            .total_entities_ = msg.entity_size(),
-                            .total_entities_success_ = msg.entity_size(),
-                            .total_vehicles_ = static_cast<
-                                int>(std::ranges::count_if(
-                                msg.entity(),
-                                &transit_realtime::FeedEntity::has_vehicle)),
-                            .feed_timestamp_ =
-                                msg.has_header() && msg.header().has_timestamp()
-                                    ? date::sys_seconds{std::chrono::seconds{
-                                          msg.header().timestamp()}}
-                                    : date::sys_seconds{}};
-              if ((has_trip_updates || !has_vehicle_positions) &&
-                  hooks.after_gtfsrt_apply_) {
-                hooks.after_gtfsrt_apply_(prepared.endpoint_idx_, fallback);
-              }
-              if (has_trip_updates) {
-                append_provider_candidates(
-                    g, msg, staged, prepared.provider_observed_at_seconds_);
-              }
+            auto const apply_gtfsrt =
+                [&](gtfs_rt_endpoint const& g,
+                    prepared_gtfsrt_update const& prepared,
+                    transit_realtime::FeedMessage const& msg,
+                    bool const fallback) {
+                  auto const has_trip_updates = std::ranges::any_of(
+                      msg.entity(),
+                      &transit_realtime::FeedEntity::has_trip_update);
+                  auto const has_vehicle_positions = std::ranges::any_of(
+                      msg.entity(), &transit_realtime::FeedEntity::has_vehicle);
+                  auto const has_alerts = std::ranges::any_of(
+                      msg.entity(), &transit_realtime::FeedEntity::has_alert);
+                  auto stats = apply_gtfsrt_timetable(g, msg, *rtt);
+                  if ((has_trip_updates || has_alerts ||
+                       !has_vehicle_positions) &&
+                      hooks.after_gtfsrt_apply_) {
+                    hooks.after_gtfsrt_apply_(prepared.endpoint_idx_, fallback);
+                  }
+                  if (has_trip_updates) {
+                    append_provider_candidates(
+                        g, msg, *rtt,
+                        prepared.provider_observed_at_seconds_);
+                  }
 
-              if (prepared.source_success_ && !fallback) {
-                auto feed_id = vehicle_feed_id(g);
-                auto const& positions_msg =
-                    prepared.differential_positions_msg_.has_value()
-                        ? *prepared.differential_positions_msg_
-                        : msg;
-                auto positions =
-                    vehicle_positions::parse_gtfsrt_vehicle_positions(
-                        feed_id, positions_msg,
-                        std::chrono::duration_cast<std::chrono::seconds>(
-                            now.time_since_epoch())
-                            .count());
-                if (c.timetable_->canned_rt_) {
-                  for (auto& position : positions) {
-                    position.reported_time_ = position.ingested_time_;
+                  if (prepared.source_success_ && !fallback) {
+                    auto feed_id = vehicle_feed_id(g);
+                    auto const& positions_msg =
+                        prepared.differential_positions_msg_.has_value()
+                            ? *prepared.differential_positions_msg_
+                            : msg;
+                    auto positions =
+                        vehicle_positions::parse_gtfsrt_vehicle_positions(
+                            feed_id, positions_msg,
+                            std::chrono::duration_cast<std::chrono::seconds>(
+                                now.time_since_epoch())
+                                .count());
+                    if (c.timetable_->canned_rt_) {
+                      for (auto& position : positions) {
+                        position.reported_time_ = position.ingested_time_;
+                      }
+                    }
+                    if (vehicle_history != nullptr) {
+                      auto const history_replace_started =
+                          std::chrono::steady_clock::now();
+                      auto observations =
+                          utl::to_vec(positions, [](auto const& position) {
+                            return to_observation(position);
+                          });
+                      auto const ingested_at =
+                          std::chrono::duration_cast<std::chrono::seconds>(
+                              now.time_since_epoch())
+                              .count();
+                      if (prepared.apply_positions_differential_) {
+                        vehicle_history->update_feed(
+                            feed_id, observations, prepared.deleted_entity_ids_,
+                            ingested_at, history_policy);
+                      } else {
+                        vehicle_history->replace_feed(
+                            feed_id, observations, ingested_at, history_policy);
+                      }
+                      history_update_cpu += std::chrono::steady_clock::now() -
+                                            history_replace_started;
+                    }
+                    if (prepared.apply_positions_differential_) {
+                      vehicle_position_store->update_feed(
+                          std::move(feed_id), std::move(positions),
+                          prepared.deleted_entity_ids_);
+                    } else {
+                      vehicle_position_store->replace_feed(
+                          std::move(feed_id), std::move(positions));
+                    }
                   }
-                }
-                if (vehicle_history != nullptr) {
-                  auto const history_replace_started =
-                      std::chrono::steady_clock::now();
-                  auto observations =
-                      utl::to_vec(positions, [](auto const& position) {
-                        return to_observation(position);
-                      });
-                  auto const ingested_at =
-                      std::chrono::duration_cast<std::chrono::seconds>(
-                          now.time_since_epoch())
-                          .count();
-                  if (prepared.apply_positions_differential_) {
-                    vehicle_history->update_feed(feed_id, observations,
-                                                 prepared.deleted_entity_ids_,
-                                                 ingested_at, history_policy);
-                  } else {
-                    vehicle_history->replace_feed(feed_id, observations,
-                                                  ingested_at, history_policy);
+                  if (prepared.commit_last_good_) {
+                    commit_last_good(g, msg);
                   }
-                  history_update_cpu += std::chrono::steady_clock::now() -
-                                        history_replace_started;
-                }
-                if (prepared.apply_positions_differential_) {
-                  vehicle_position_store->update_feed(
-                      std::move(feed_id), std::move(positions),
-                      prepared.deleted_entity_ids_);
-                } else {
-                  vehicle_position_store->replace_feed(std::move(feed_id),
-                                                       std::move(positions));
-                }
-              }
-              if (prepared.commit_last_good_) {
-                commit_last_good(g, msg);
-              }
-              rtt = std::make_unique<n::rt_timetable>(std::move(staged));
-              return stats;
-            };
+                  return stats;
+                };
 
             // Collect every response before parsing or mutating the timetable.
             auto const feed_wait_started = std::chrono::steady_clock::now();
@@ -1467,7 +1624,10 @@ void run_rt_update(boost::asio::io_context& ioc,
                 auto stats = apply_gtfsrt(g, prepared, *prepared.msg_, false);
                 results[prepared.endpoint_idx_] = {std::move(stats),
                                                    prepared.source_success_};
+                applied_gtfsrt_updates.push_back(
+                    {prepared.endpoint_idx_, std::move(*prepared.msg_)});
               } catch (std::exception const& e) {
+                restore_provider_timetable();
                 if (!c.timetable_->canned_rt_) {
                   g.metrics_.updates_error_.Increment();
                 }
@@ -1478,7 +1638,10 @@ void run_rt_update(boost::asio::io_context& ioc,
                   try {
                     results[prepared.endpoint_idx_] = {
                         apply_gtfsrt(g, fallback, *fallback.msg_, true), false};
+                    applied_gtfsrt_updates.push_back(
+                        {fallback.endpoint_idx_, std::move(*fallback.msg_)});
                   } catch (std::exception const& fallback_error) {
+                    restore_provider_timetable();
                     if (!c.timetable_->canned_rt_) {
                       g.metrics_.updates_error_.Increment();
                     }
@@ -1488,6 +1651,7 @@ void run_rt_update(boost::asio::io_context& ioc,
                     results[prepared.endpoint_idx_] = {
                         n::rt::statistics{.parser_error_ = true}, false};
                   } catch (...) {
+                    restore_provider_timetable();
                     if (!c.timetable_->canned_rt_) {
                       g.metrics_.updates_error_.Increment();
                     }
@@ -1544,7 +1708,11 @@ void run_rt_update(boost::asio::io_context& ioc,
                   }
                 }
               }
+              if (c.has_elevators()) {
+                copy_elevator_footpaths(*published_rt->rtt_, *auser_rtt);
+              }
               rtt = std::make_unique<n::rt_timetable>(*auser_rtt);
+              checkpoint_provider_timetable();
               for (auto& group : groups) {
                 for (auto& update : group.updates_) {
                   if (auto* prepared =
@@ -1555,13 +1723,23 @@ void run_rt_update(boost::asio::io_context& ioc,
                 }
               }
             } else {
+              if (has_gtfsrt_endpoint) {
+                checkpoint_provider_timetable();
+              }
               for (auto& group : groups) {
                 for (auto& update : group.updates_) {
                   utl::visit(update, apply_prepared_gtfsrt,
-                             apply_prepared_auser);
+                             [&](prepared_auser_update& prepared) {
+                               apply_prepared_auser(prepared);
+                               if (has_gtfsrt_endpoint) {
+                                 checkpoint_provider_timetable();
+                               }
+                             });
                 }
               }
             }
+            set_workload("feed_apply_timetable_clones",
+                         feed_apply_timetable_clones);
 
             for (auto&& [ep, result] : utl::zip(endpoints, results)) {
               utl::visit(
@@ -1600,14 +1778,22 @@ void run_rt_update(boost::asio::io_context& ioc,
             auto prediction_candidates =
                 std::vector<vehicle_prediction_cycle_result>{};
             auto cycle_selections = std::vector<selected_cycle_prediction>{};
+            auto const cycle_now =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    now.time_since_epoch())
+                    .count();
+            auto const position_max_age =
+                vehicle_matching::vehicle_position_retention_seconds(
+                    c.timetable_->update_interval_,
+                    c.timetable_->vehicle_eta_.transform([](auto const& eta) {
+                      return eta.history_.max_age_seconds_;
+                    }));
+            vehicle_position_store->prune_before_ingested_time(
+                vehicle_matching::freshness_cutoff(
+                    cycle_now, position_max_age));
+            provider_candidates =
+                merge_provider_candidates(std::move(provider_candidates));
             if (vehicle_history != nullptr) {
-              auto const cycle_now =
-                  std::chrono::duration_cast<std::chrono::seconds>(
-                      now.time_since_epoch())
-                      .count();
-              vehicle_position_store->prune_before_ingested_time(
-                  vehicle_matching::freshness_cutoff(
-                      cycle_now, history_policy.max_age_.count()));
               auto const history_prune_started =
                   std::chrono::steady_clock::now();
               vehicle_history->prune(cycle_now, history_policy);
@@ -1736,24 +1922,7 @@ void run_rt_update(boost::asio::io_context& ioc,
                 if (existing == end(candidates)) {
                   candidates.emplace_back(std::move(provider));
                 } else {
-                  for (auto& prediction : provider.provider_predictions_) {
-                    auto const prior = std::ranges::find_if(
-                        existing->provider_predictions_,
-                        [&](vehicle_stop_prediction const& candidate) {
-                          return candidate.static_stop_sequence_ ==
-                                     prediction.static_stop_sequence_ &&
-                                 candidate.event_type_ ==
-                                     prediction.event_type_;
-                        });
-                    if (prior == end(existing->provider_predictions_)) {
-                      existing->provider_predictions_.emplace_back(
-                          std::move(prediction));
-                    } else {
-                      *prior = std::move(prediction);
-                    }
-                  }
-                  existing->provider_reference_timestamp_seconds_ =
-                      provider.provider_reference_timestamp_seconds_;
+                  merge_provider_predictions(*existing, std::move(provider));
                 }
               }
               set_phase("continuation_provider_merge",
@@ -1781,10 +1950,18 @@ void run_rt_update(boost::asio::io_context& ioc,
                              calibration.pending_entries_);
                 set_workload("calibration_completed",
                              calibration.completed_entries_);
-                set_workload("calibration_appended_records",
-                             calibration.appended_records_);
-                set_workload("calibration_appended_bytes",
-                             calibration.appended_bytes_);
+                set_workload("calibration_queued_records",
+                             calibration.queued_records_);
+                set_workload("calibration_queued_bytes",
+                             calibration.queued_bytes_);
+                set_workload("calibration_dropped_records",
+                             calibration.dropped_records_);
+                set_workload("calibration_dropped_bytes",
+                             calibration.dropped_bytes_);
+                set_workload("calibration_persistence_failed_records",
+                             calibration.persistence_failed_records_);
+                set_workload("calibration_persistence_failed_bytes",
+                             calibration.persistence_failed_bytes_);
               }
               set_phase("calibration_capture", calibration_started);
               auto const metric_aggregation_started =
@@ -1932,6 +2109,7 @@ void run_rt_update(boost::asio::io_context& ioc,
               set_phase("selection", selection_started);
               set_workload("selected_overlays", selected_overlays.size());
             } else {
+              prediction_candidates = std::move(provider_candidates);
               history_active_vehicles.Set(0.0);
               history_observations.Set(0.0);
               history_memory_bytes.Set(0.0);
@@ -1973,11 +2151,11 @@ void run_rt_update(boost::asio::io_context& ioc,
                   prediction_overlay_state);
             }
             set_phase("overlay", overlay_started);
-            if (vehicle_history != nullptr) {
+            if (!prediction_candidates.empty()) {
               auto const diagnostics_started = std::chrono::steady_clock::now();
               pending_prediction_diagnostics =
                   build_vehicle_prediction_diagnostics(
-                      c, eta_control, prediction_candidates, cycle_selections,
+                      c, prediction_candidates, cycle_selections,
                       overlay_result.applied_transports_,
                       prediction_overlay_state,
                       std::chrono::duration_cast<std::chrono::seconds>(

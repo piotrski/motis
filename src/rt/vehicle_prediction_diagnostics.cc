@@ -1,5 +1,6 @@
 #include "motis/rt/vehicle_prediction_diagnostics.h"
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 #include <string_view>
@@ -13,6 +14,7 @@
 #include "motis/rt/vehicle_observation_history.h"
 #include "motis/rt/vehicle_position.h"
 #include "motis/rt/vehicle_prediction_continuation.h"
+#include "motis/rt/vehicle_prediction_limits.h"
 #include "motis/tag_lookup.h"
 #include "motis/timetable/time_conv.h"
 
@@ -29,12 +31,31 @@ auto configured_mode(config const& c,
                             : control->resolve(c, feed, mode);
 }
 
+bool feed_enabled(config const& c,
+                  vehicle_eta_runtime_control const* const control,
+                  std::string_view const feed) {
+  for (auto i = 0U; i != n::kNumClasses; ++i) {
+    if (configured_mode(c, control, feed, static_cast<n::clasz>(i)) !=
+        config::timetable::vehicle_eta::mode::off) {
+      return true;
+    }
+  }
+  return false;
+}
+
 vehicle_key key_for(vehicle_positions::vehicle_position const& vehicle) {
   return vehicle.vehicle_.id_.has_value()
              ? vehicle_key{vehicle.feed_id_, *vehicle.vehicle_.id_,
                            vehicle_key_source::kVehicleDescriptor}
              : vehicle_key{vehicle.feed_id_, vehicle.entity_id_,
                            vehicle_key_source::kEntityId};
+}
+
+vehicle_trip_instance trip_for(
+    vehicle_positions::vehicle_position const& vehicle) {
+  return {.trip_id_ = vehicle.trip_.trip_id_,
+          .start_date_ = vehicle.trip_.start_date_,
+          .start_time_ = vehicle.trip_.start_time_};
 }
 
 vehicle_prediction_cycle_result rejected(
@@ -72,6 +93,9 @@ evaluate_vehicle_prediction_candidates(
           .max_observation_age_seconds_ = history_policy.max_age_seconds_,
           .max_observation_gap_seconds_ =
               history_policy.max_observation_gap_seconds_}};
+  auto const cutoff =
+      vehicle_matching::freshness_cutoff(now, history_policy.max_age_seconds_);
+  auto evaluated_positions = std::size_t{0U};
   for (auto const& position : positions.all()) {
     auto feed = std::string{vehicle_matching::dataset_tag(position.feed_id_)};
     auto const latest_observation =
@@ -89,6 +113,34 @@ evaluate_vehicle_prediction_candidates(
           vehicle_prediction_rejection_reason::kUnsupportedTripRelationship,
           latest_observation));
       continue;
+    }
+    if (!feed_enabled(c, control, feed)) {
+      continue;
+    }
+    auto const observations =
+        history.observations(key_for(position), trip_for(position));
+    if (observations.empty()) {
+      results.push_back(
+          rejected(std::move(feed),
+                   vehicle_prediction_rejection_reason::kInsufficientHistory,
+                   latest_observation));
+      continue;
+    }
+    auto const has_fresh_history = std::ranges::any_of(
+        observations, [&](vehicle_observation const& observation) {
+          return (observation_time(observation) <= now ||
+                  observation.ingested_time_ <= now) &&
+                 std::min({observation_time(observation),
+                           observation.ingested_time_, now}) >= cutoff;
+        });
+    if (!has_fresh_history) {
+      results.push_back(rejected(
+          std::move(feed), vehicle_prediction_rejection_reason::kStaleHistory,
+          latest_observation));
+      continue;
+    }
+    if (evaluated_positions++ >= kMaxVehiclePredictionPositionsPerCycle) {
+      break;
     }
     auto run = vehicle_matching::resolve_run(tags, tt, rtt, position);
     if (!run.has_value()) {
@@ -115,8 +167,7 @@ evaluate_vehicle_prediction_candidates(
         .mode_ = mode,
         .trip_stop_range_ = run->stop_range_,
         .latest_vehicle_observation_timestamp_seconds_ = latest_observation};
-    result.batch_ =
-        engine.evaluate(*run, history.observations(key_for(position)), now);
+    result.batch_ = engine.evaluate(*run, observations, now);
     if (result.batch_.eligible()) {
       auto const trip = (*run)[0].get_trip_idx(n::event_type::kDep);
       auto const encoded = tt.trip_stop_seq_numbers_[trip];
@@ -126,7 +177,8 @@ evaluate_vehicle_prediction_candidates(
       auto const sequences = std::vector<n::stop_idx_t>{begin(sequence_range),
                                                         end(sequence_range)};
       for (auto const& prediction : result.batch_.predictions_) {
-        auto const stop_count = run->stop_range_.size();
+        auto const stop_count =
+            static_cast<n::stop_idx_t>(run->stop_range_.size());
         for (auto i = n::stop_idx_t{0U}; i != stop_count; ++i) {
           auto const event =
               prediction.event_type_ == vehicle_prediction_event_type::kArrival
