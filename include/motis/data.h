@@ -20,6 +20,9 @@
 #include "motis/gbfs/data.h"
 #include "motis/match_platforms.h"
 #include "motis/rt/auser.h"
+#include "motis/rt/vehicle_observation_history.h"
+#include "motis/rt/vehicle_position.h"
+#include "motis/rt/vehicle_prediction_store.h"
 #include "motis/types.h"
 
 namespace motis {
@@ -35,10 +38,27 @@ using ptr = std::unique_ptr<T>;
 struct rt {
   rt();
   rt(ptr<nigiri::rt_timetable>&&, ptr<elevators>&&, ptr<railviz_rt_index>&&);
+  rt(ptr<nigiri::rt_timetable>&&,
+     ptr<elevators>&&,
+     ptr<railviz_rt_index>&&,
+     ptr<vehicle_positions::vehicle_position_store>&&,
+     ptr<vehicle_observation_history>&& = nullptr,
+     ptr<vehicle_prediction_diagnostics_store>&& = nullptr);
+  rt(ptr<nigiri::rt_timetable>&&,
+     ptr<nigiri::rt_timetable>&& provider_rtt,
+     ptr<elevators>&&,
+     ptr<railviz_rt_index>&&,
+     ptr<vehicle_positions::vehicle_position_store>&&,
+     ptr<vehicle_observation_history>&& = nullptr,
+     ptr<vehicle_prediction_diagnostics_store>&& = nullptr);
   ~rt();
   ptr<nigiri::rt_timetable> rtt_;
+  ptr<nigiri::rt_timetable> provider_rtt_;
   ptr<railviz_rt_index> railviz_rt_;
   ptr<elevators> e_;
+  ptr<vehicle_positions::vehicle_position_store> vehicle_positions_;
+  ptr<vehicle_observation_history> vehicle_observation_history_;
+  ptr<vehicle_prediction_diagnostics_store> vehicle_prediction_diagnostics_;
 };
 
 struct data {
@@ -75,11 +95,10 @@ struct data {
     // !!! Remember to add all new members !!!
     return std::tie(config_, initial_response_, t_, adr_ext_, f_, tz_, r_, tc_,
                     w_, pl_, l_, elevations_, tt_, tbd_, tags_, location_rtree_,
-                    canonical_stop_registry_,
-                    elevator_nodes_, elevator_osm_mapping_, shapes_,
-                    railviz_static_, matches_, way_matches_, rt_, gbfs_,
-                    odm_bounds_, ride_sharing_bounds_, flex_areas_, metrics_,
-                    auser_);
+                    canonical_stop_registry_, elevator_nodes_,
+                    elevator_osm_mapping_, shapes_, railviz_static_, matches_,
+                    way_matches_, rt_, gbfs_, odm_bounds_, ride_sharing_bounds_,
+                    flex_areas_, metrics_, auser_);
   }
 
   std::filesystem::path path_;

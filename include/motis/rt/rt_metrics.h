@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "prometheus/counter.h"
 #include "prometheus/family.h"
 #include "prometheus/gauge.h"
@@ -98,6 +100,116 @@ struct rt_metric_families {
             prometheus::BuildGauge()
                 .Name("nigiri_gtfsrt_last_update_timestamp_seconds")
                 .Help("Last update timestamp of the GTFS-RT feed")
+                .Register(registry)},
+        gtfsrt_source_events_{
+            prometheus::BuildCounter()
+                .Name("nigiri_gtfsrt_source_events_total")
+                .Help("Last-good source cache and failure events")
+                .Register(registry)},
+        gtfsrt_source_state_{
+            prometheus::BuildGauge()
+                .Name("nigiri_gtfsrt_source_state")
+                .Help("Current GTFS-RT source state (one-hot by state label)")
+                .Register(registry)},
+        gtfsrt_source_cache_age_{
+            prometheus::BuildGauge()
+                .Name("nigiri_gtfsrt_source_cache_age_seconds")
+                .Help("Age of the materialized GTFS-RT source snapshot")
+                .Register(registry)},
+        gtfsrt_source_cache_fresh_{
+            prometheus::BuildGauge()
+                .Name("nigiri_gtfsrt_source_cache_fresh")
+                .Help("Whether the materialized GTFS-RT snapshot is fresh")
+                .Register(registry)},
+        rt_cycle_completed_{
+            prometheus::BuildCounter()
+                .Name("motis_rt_cycle_completed_total")
+                .Help("Number of completed realtime update cycles")
+                .Register(registry)},
+        rt_cycle_duration_seconds_{
+            prometheus::BuildGauge()
+                .Name("motis_rt_cycle_duration_seconds")
+                .Help("Wall time of the last completed realtime update cycle")
+                .Register(registry)},
+        rt_cycle_overrun_{
+            prometheus::BuildCounter()
+                .Name("motis_rt_cycle_overrun_total")
+                .Help("Realtime update cycles exceeding the configured cadence")
+                .Register(registry)},
+        rt_cycle_phase_seconds_{
+            prometheus::BuildGauge()
+                .Name("motis_rt_cycle_phase_seconds")
+                .Help("Wall time of a phase in the last realtime update cycle")
+                .Register(registry)},
+        rt_cycle_workload_{
+            prometheus::BuildGauge()
+                .Name("motis_rt_cycle_workload")
+                .Help(
+                    "Workload size observed in the last realtime update cycle")
+                .Register(registry)},
+        vehicle_eta_history_active_vehicles_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_history_active_vehicles")
+                .Help("Vehicles retained in the published prediction history")
+                .Register(registry)},
+        vehicle_eta_history_observations_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_history_observations")
+                .Help("Observations retained in prediction history")
+                .Register(registry)},
+        vehicle_eta_history_memory_bytes_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_history_memory_bytes")
+                .Help("Estimated bytes retained by prediction history")
+                .Register(registry)},
+        vehicle_eta_history_update_seconds_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_history_update_seconds")
+                .Help("CPU time spent updating prediction history this cycle")
+                .Register(registry)},
+        vehicle_eta_progress_outcomes_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_progress_outcomes")
+                .Help(
+                    "Current shadow progress outcomes by feed, mode and result")
+                .Register(registry)},
+        vehicle_eta_progress_lateral_error_meters_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_progress_lateral_error_meters")
+                .Help("Current projected lateral error by feed, mode and "
+                      "statistic")
+                .Register(registry)},
+        vehicle_eta_progress_evaluation_seconds_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_progress_evaluation_seconds")
+                .Help(
+                    "CPU time spent evaluating shadow trip progress this cycle")
+                .Register(registry)},
+        vehicle_eta_candidate_outcomes_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_candidate_outcomes")
+                .Help("Current shadow ETA candidate outcomes by feed and mode")
+                .Register(registry)},
+        vehicle_eta_candidate_horizon_seconds_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_candidate_horizon_seconds")
+                .Help("Current shadow ETA candidate horizon statistics")
+                .Register(registry)},
+        vehicle_eta_candidate_error_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_candidate_error")
+                .Help("Current candidate versus provider raw-second and "
+                      "rendered-minute error statistics")
+                .Register(registry)},
+        vehicle_eta_candidate_evaluation_seconds_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_candidate_evaluation_seconds")
+                .Help("CPU time spent evaluating shadow ETA candidates")
+                .Register(registry)},
+        vehicle_eta_candidate_memory_bytes_{
+            prometheus::BuildGauge()
+                .Name("motis_vehicle_eta_candidate_memory_bytes")
+                .Help("Estimated transient bytes used by shadow ETA results")
                 .Register(registry)},
         vdvaus_updates_requested_{prometheus::BuildCounter()
                                       .Name("nigiri_vdvaus_updates_requested_"
@@ -271,6 +383,30 @@ struct rt_metric_families {
       gtfsrt_unsupported_schedule_relationship_;
   prometheus::Family<prometheus::Gauge>& gtfsrt_feed_timestamp_;
   prometheus::Family<prometheus::Gauge>& gtfsrt_last_update_timestamp_;
+  prometheus::Family<prometheus::Counter>& gtfsrt_source_events_;
+  prometheus::Family<prometheus::Gauge>& gtfsrt_source_state_;
+  prometheus::Family<prometheus::Gauge>& gtfsrt_source_cache_age_;
+  prometheus::Family<prometheus::Gauge>& gtfsrt_source_cache_fresh_;
+  prometheus::Family<prometheus::Counter>& rt_cycle_completed_;
+  prometheus::Family<prometheus::Gauge>& rt_cycle_duration_seconds_;
+  prometheus::Family<prometheus::Counter>& rt_cycle_overrun_;
+  prometheus::Family<prometheus::Gauge>& rt_cycle_phase_seconds_;
+  prometheus::Family<prometheus::Gauge>& rt_cycle_workload_;
+  prometheus::Family<prometheus::Gauge>& vehicle_eta_history_active_vehicles_;
+  prometheus::Family<prometheus::Gauge>& vehicle_eta_history_observations_;
+  prometheus::Family<prometheus::Gauge>& vehicle_eta_history_memory_bytes_;
+  prometheus::Family<prometheus::Gauge>& vehicle_eta_history_update_seconds_;
+  prometheus::Family<prometheus::Gauge>& vehicle_eta_progress_outcomes_;
+  prometheus::Family<prometheus::Gauge>&
+      vehicle_eta_progress_lateral_error_meters_;
+  prometheus::Family<prometheus::Gauge>&
+      vehicle_eta_progress_evaluation_seconds_;
+  prometheus::Family<prometheus::Gauge>& vehicle_eta_candidate_outcomes_;
+  prometheus::Family<prometheus::Gauge>& vehicle_eta_candidate_horizon_seconds_;
+  prometheus::Family<prometheus::Gauge>& vehicle_eta_candidate_error_;
+  prometheus::Family<prometheus::Gauge>&
+      vehicle_eta_candidate_evaluation_seconds_;
+  prometheus::Family<prometheus::Gauge>& vehicle_eta_candidate_memory_bytes_;
 
   prometheus::Family<prometheus::Counter>& vdvaus_updates_requested_;
   prometheus::Family<prometheus::Counter>& vdvaus_updates_successful_;
@@ -302,8 +438,12 @@ struct rt_metric_families {
   prometheus::Family<prometheus::Gauge>& vdvaus_last_update_timestamp_;
 };
 
+enum struct gtfsrt_source_state { no_base, live, replay, expired };
+
 struct gtfsrt_metrics {
-  explicit gtfsrt_metrics(std::string const& tag, rt_metric_families const& m)
+  explicit gtfsrt_metrics(std::string const& tag,
+                          std::string const& endpoint,
+                          rt_metric_families const& m)
       : updates_requested_{m.gtfsrt_updates_requested_.Add({{"tag", tag}})},
         updates_successful_{m.gtfsrt_updates_successful_.Add({{"tag", tag}})},
         updates_error_{m.gtfsrt_updates_error_.Add({{"tag", tag}})},
@@ -324,7 +464,52 @@ struct gtfsrt_metrics {
             m.gtfsrt_unsupported_schedule_relationship_.Add({{"tag", tag}})},
         feed_timestamp_{m.gtfsrt_feed_timestamp_.Add({{"tag", tag}})},
         last_update_timestamp_{
-            m.gtfsrt_last_update_timestamp_.Add({{"tag", tag}})} {}
+            m.gtfsrt_last_update_timestamp_.Add({{"tag", tag}})},
+        fetch_error_{m.gtfsrt_source_events_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}, {"event", "fetch_error"}})},
+        empty_body_{m.gtfsrt_source_events_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}, {"event", "empty_body"}})},
+        decode_error_{m.gtfsrt_source_events_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}, {"event", "decode_error"}})},
+        missing_header_{
+            m.gtfsrt_source_events_.Add({{"tag", tag},
+                                         {"endpoint", endpoint},
+                                         {"event", "missing_header"}})},
+        last_good_reuse_{
+            m.gtfsrt_source_events_.Add({{"tag", tag},
+                                         {"endpoint", endpoint},
+                                         {"event", "last_good_reuse"}})},
+        last_good_expiry_{
+            m.gtfsrt_source_events_.Add({{"tag", tag},
+                                         {"endpoint", endpoint},
+                                         {"event", "last_good_expiry"}})},
+        recovery_{m.gtfsrt_source_events_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}, {"event", "recovery"}})},
+        state_no_base_{m.gtfsrt_source_state_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}, {"state", "no_base"}})},
+        state_live_{m.gtfsrt_source_state_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}, {"state", "live"}})},
+        state_replay_{m.gtfsrt_source_state_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}, {"state", "replay"}})},
+        state_expired_{m.gtfsrt_source_state_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}, {"state", "expired"}})},
+        cache_age_{m.gtfsrt_source_cache_age_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}})},
+        cache_fresh_{m.gtfsrt_source_cache_fresh_.Add(
+            {{"tag", tag}, {"endpoint", endpoint}})} {
+    set_source_state(gtfsrt_source_state::no_base, 0.0, false);
+  }
+
+  void set_source_state(gtfsrt_source_state const state,
+                        double const cache_age,
+                        bool const fresh) const {
+    state_no_base_.Set(state == gtfsrt_source_state::no_base ? 1.0 : 0.0);
+    state_live_.Set(state == gtfsrt_source_state::live ? 1.0 : 0.0);
+    state_replay_.Set(state == gtfsrt_source_state::replay ? 1.0 : 0.0);
+    state_expired_.Set(state == gtfsrt_source_state::expired ? 1.0 : 0.0);
+    cache_age_.Set(cache_age);
+    cache_fresh_.Set(fresh ? 1.0 : 0.0);
+  }
 
   void update(nigiri::rt::statistics const& stats) const {
     total_entities_.Increment(stats.total_entities_);
@@ -358,6 +543,19 @@ struct gtfsrt_metrics {
   prometheus::Counter& unsupported_schedule_relationship_;
   prometheus::Gauge& feed_timestamp_;
   prometheus::Gauge& last_update_timestamp_;
+  prometheus::Counter& fetch_error_;
+  prometheus::Counter& empty_body_;
+  prometheus::Counter& decode_error_;
+  prometheus::Counter& missing_header_;
+  prometheus::Counter& last_good_reuse_;
+  prometheus::Counter& last_good_expiry_;
+  prometheus::Counter& recovery_;
+  prometheus::Gauge& state_no_base_;
+  prometheus::Gauge& state_live_;
+  prometheus::Gauge& state_replay_;
+  prometheus::Gauge& state_expired_;
+  prometheus::Gauge& cache_age_;
+  prometheus::Gauge& cache_fresh_;
 };
 
 struct vdvaus_metrics {

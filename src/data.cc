@@ -26,9 +26,9 @@
 #include "nigiri/shapes_storage.h"
 #include "nigiri/timetable.h"
 
+#include "motis/canonical_stop_registry.h"
 #include "motis/config.h"
 #include "motis/constants.h"
-#include "motis/canonical_stop_registry.h"
 #include "motis/elevators/update_elevators.h"
 #include "motis/endpoints/initial.h"
 #include "motis/flex/flex_areas.h"
@@ -47,12 +47,46 @@ namespace n = nigiri;
 
 namespace motis {
 
-rt::rt() = default;
+rt::rt()
+    : vehicle_positions_{
+          std::make_unique<vehicle_positions::vehicle_position_store>()} {}
 
 rt::rt(ptr<nigiri::rt_timetable>&& rtt,
        ptr<elevators>&& e,
        ptr<railviz_rt_index>&& railviz)
-    : rtt_{std::move(rtt)}, railviz_rt_{std::move(railviz)}, e_{std::move(e)} {}
+    : rt{std::move(rtt), std::move(e), std::move(railviz),
+         std::make_unique<vehicle_positions::vehicle_position_store>()} {}
+
+rt::rt(ptr<nigiri::rt_timetable>&& rtt,
+       ptr<elevators>&& e,
+       ptr<railviz_rt_index>&& railviz,
+       ptr<vehicle_positions::vehicle_position_store>&& vehicle_positions,
+       ptr<vehicle_observation_history>&& vehicle_observation_history,
+       ptr<vehicle_prediction_diagnostics_store>&& prediction_diagnostics)
+    : rtt_{std::move(rtt)},
+      provider_rtt_{rtt_ != nullptr
+                        ? std::make_unique<nigiri::rt_timetable>(*rtt_)
+                        : nullptr},
+      railviz_rt_{std::move(railviz)},
+      e_{std::move(e)},
+      vehicle_positions_{std::move(vehicle_positions)},
+      vehicle_observation_history_{std::move(vehicle_observation_history)},
+      vehicle_prediction_diagnostics_{std::move(prediction_diagnostics)} {}
+
+rt::rt(ptr<nigiri::rt_timetable>&& rtt,
+       ptr<nigiri::rt_timetable>&& provider_rtt,
+       ptr<elevators>&& e,
+       ptr<railviz_rt_index>&& railviz,
+       ptr<vehicle_positions::vehicle_position_store>&& vehicle_positions,
+       ptr<vehicle_observation_history>&& vehicle_observation_history,
+       ptr<vehicle_prediction_diagnostics_store>&& prediction_diagnostics)
+    : rtt_{std::move(rtt)},
+      provider_rtt_{std::move(provider_rtt)},
+      railviz_rt_{std::move(railviz)},
+      e_{std::move(e)},
+      vehicle_positions_{std::move(vehicle_positions)},
+      vehicle_observation_history_{std::move(vehicle_observation_history)},
+      vehicle_prediction_diagnostics_{std::move(prediction_diagnostics)} {}
 
 rt::~rt() = default;
 
@@ -240,8 +274,9 @@ data::data(std::filesystem::path p, config const& c)
   throw_if_failed("elevators", elevators);
   throw_if_failed("tiles", tiles);
 
-  if (c.timetable_ != std::nullopt && c.timetable_->coalesce_equivalent_stops_ &&
-      tt_ != nullptr && tags_ != nullptr) {
+  if (c.timetable_ != std::nullopt &&
+      c.timetable_->coalesce_equivalent_stops_ && tt_ != nullptr &&
+      tags_ != nullptr) {
     canonical_stop_registry_ = std::make_unique<canonical_stop_registry>(
         *c.timetable_, *tt_, *tags_, adr_ext_.get(), tz_.get());
   }
@@ -300,6 +335,7 @@ void data::init_initial(std::string_view motis_version) {
 void data::init_rtt(date::sys_days const d) {
   rt_->rtt_ =
       std::make_unique<n::rt_timetable>(n::rt::create_rt_timetable(*tt_, d));
+  rt_->provider_rtt_ = std::make_unique<n::rt_timetable>(*rt_->rtt_);
 }
 
 void data::load_shapes() {
