@@ -163,8 +163,7 @@ evaluate_vehicle_prediction_candidates(
     }
     auto continuation = derive_vehicle_prediction_continuation(
         tt, tags, *run, vehicle_matching::dataset_tag(position.feed_id_),
-        result.trip_id_,
-        result.batch_);
+        result.trip_id_, result.batch_);
     results.emplace_back(std::move(result));
     if (continuation.has_value() &&
         configured_mode(

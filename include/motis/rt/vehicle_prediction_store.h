@@ -14,7 +14,17 @@
 #include "motis/rt/vehicle_prediction_continuation.h"
 #include "motis/rt/vehicle_prediction_selection.h"
 
+namespace nigiri {
+struct timetable;
+}
+
 namespace motis {
+
+[[nodiscard]] std::optional<unsigned> static_stop_sequence(
+    nigiri::timetable const&,
+    nigiri::transport_idx_t,
+    nigiri::trip_idx_t,
+    nigiri::stop_idx_t);
 
 struct prediction_candidate_diagnostic {
   vehicle_prediction_source source_{vehicle_prediction_source::kSchedule};
@@ -91,6 +101,7 @@ struct vehicle_prediction_diagnostics_store {
   [[nodiscard]] vehicle_prediction_diagnostic_entry const* find_event(
       nigiri::transport,
       std::string_view trip_id,
+      unsigned static_stop_sequence,
       std::int64_t scheduled_timestamp_seconds,
       vehicle_prediction_event_type) const;
   [[nodiscard]] vehicle_prediction_diagnostic_entry const* find_incoming_leg(

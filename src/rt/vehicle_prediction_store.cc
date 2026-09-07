@@ -5,6 +5,9 @@
 #include <tuple>
 #include <utility>
 
+#include "nigiri/loader/gtfs/stop_seq_number_encoding.h"
+#include "nigiri/timetable.h"
+
 namespace motis {
 namespace {
 
@@ -25,6 +28,31 @@ auto transport_entries(
 
 }  // namespace
 
+std::optional<unsigned> static_stop_sequence(
+    nigiri::timetable const& tt,
+    nigiri::transport_idx_t const transport,
+    nigiri::trip_idx_t const trip,
+    nigiri::stop_idx_t const stop) {
+  if (trip == nigiri::trip_idx_t::invalid()) {
+    return std::nullopt;
+  }
+  auto const ranges = tt.trip_transport_ranges_[trip];
+  auto const match = std::ranges::find_if(ranges, [&](auto const& entry) {
+    return entry.first == transport && entry.second.from_ <= stop &&
+           stop < entry.second.to_;
+  });
+  if (match == end(ranges)) {
+    return std::nullopt;
+  }
+  auto const encoded = tt.trip_stop_seq_numbers_[trip];
+  auto const sequences = nigiri::loader::gtfs::stop_seq_number_range{
+      {encoded.data(), encoded.size()},
+      static_cast<nigiri::stop_idx_t>(match->second.size())};
+  auto it = begin(sequences);
+  std::advance(it, static_cast<std::ptrdiff_t>(stop - match->second.from_));
+  return static_cast<unsigned>(*it);
+}
+
 prediction_candidate_diagnostic resolve_effective_prediction(
     bool const is_realtime,
     std::int64_t const scheduled_timestamp_seconds,
@@ -35,8 +63,12 @@ prediction_candidate_diagnostic resolve_effective_prediction(
        !is_realtime)) {
     return diagnostic->effective_;
   }
-  return {.source_ = is_realtime ? vehicle_prediction_source::kProvider
-                                 : vehicle_prediction_source::kSchedule,
+  auto const has_realtime_prediction =
+      is_realtime &&
+      operational_timestamp_seconds != scheduled_timestamp_seconds;
+  return {.source_ = has_realtime_prediction
+                         ? vehicle_prediction_source::kProvider
+                         : vehicle_prediction_source::kSchedule,
           .predicted_timestamp_seconds_ = operational_timestamp_seconds,
           .delay_seconds_ =
               operational_timestamp_seconds - scheduled_timestamp_seconds};
@@ -103,11 +135,13 @@ vehicle_prediction_diagnostic_entry const*
 vehicle_prediction_diagnostics_store::find_event(
     nigiri::transport const transport,
     std::string_view const trip_id,
+    unsigned const static_stop_sequence,
     std::int64_t const scheduled_timestamp_seconds,
     vehicle_prediction_event_type const event_type) const {
   auto const range = transport_entries(entries_, transport);
   auto const it = std::ranges::find_if(range, [&](auto const& entry) {
     return entry.trip_id_ == trip_id &&
+           entry.static_stop_sequence_ == static_stop_sequence &&
            entry.scheduled_timestamp_seconds_ == scheduled_timestamp_seconds &&
            entry.event_type_ == event_type;
   });

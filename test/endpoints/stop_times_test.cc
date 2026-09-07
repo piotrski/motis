@@ -198,7 +198,7 @@ TEST(motis, stop_times) {
         vehicle_prediction_diagnostics_store::build(
             true,
             {{.transport_ = ice_frun.t_,
-              .static_stop_sequence_ = 2U,
+              .static_stop_sequence_ = 1U,
               .trip_id_ = ice.tripId_,
               .observed_at_seconds_ = scheduled,
               .scheduled_timestamp_seconds_ = scheduled,
@@ -264,12 +264,27 @@ TEST(motis, stop_times) {
     EXPECT_TRUE(std::ranges::none_of(v6_next.stopTimes_, [&](auto const& x) {
       return x.tripId_ == v6.stopTimes_.back().tripId_;
     }));
+    EXPECT_THROW(
+        stop_times(
+            "/api/v6/stoptimes?stopId=test_FFM_10&n=1&pageCursor="
+            "eyJ2IjoxLCJkIjoiTCIsInQiOi05MjIzMzcyMDM2ODU0Nzc1ODA4LCJpIjoieCJ9"),
+        net::bad_request_exception);
+    EXPECT_THROW(
+        stop_times(
+            "/api/v6/stoptimes?stopId=test_FFM_10&n=1&pageCursor="
+            "eyJ2IjoxLCJkIjoiRSIsInQiOjkyMjMzNzIwMzY4NTQ3NzU4MDcsImkiOiJ4In0"),
+        net::bad_request_exception);
+    EXPECT_THROW(
+        stop_times(
+            "/api/v6/stoptimes?stopId=test_FFM_10&direction=LATER"
+            "&time=2019-04-30T23:30:00.000Z&window=9223372036854775807"),
+        net::bad_request_exception);
 
     d.rt_->vehicle_prediction_diagnostics_ =
         vehicle_prediction_diagnostics_store::build(
             true,
             {{.transport_ = ice_frun.t_,
-              .static_stop_sequence_ = 2U,
+              .static_stop_sequence_ = 1U,
               .trip_id_ = ice.tripId_,
               .observed_at_seconds_ = scheduled,
               .scheduled_timestamp_seconds_ = scheduled,
@@ -304,6 +319,55 @@ TEST(motis, stop_times) {
     EXPECT_EQ(api::PredictionSourceEnum::PROVIDER, selected.source_);
     EXPECT_EQ(600, selected.delaySeconds_);
     EXPECT_TRUE(selected.time_.ends_with(":55:00Z"));
+
+    auto const first_page = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T22:54:00.000Z&arriveBy=true&direction=LATER&n=1");
+    ASSERT_EQ(1U, first_page.stopTimes_.size());
+    EXPECT_EQ(ice.tripId_, first_page.stopTimes_.front().tripId_);
+    auto const second_page = stop_times(fmt::format(
+        "/api/v6/stoptimes?stopId=test_FFM_10&arriveBy=true&n=1&pageCursor={}",
+        first_page.nextPageCursor_));
+    ASSERT_EQ(1U, second_page.stopTimes_.size());
+    EXPECT_NE(ice.tripId_, second_page.stopTimes_.front().tripId_);
+
+    d.rt_->vehicle_prediction_diagnostics_ =
+        vehicle_prediction_diagnostics_store::build(
+            true,
+            {{.transport_ = ice_frun.t_,
+              .static_stop_sequence_ = 1U,
+              .event_type_ = vehicle_prediction_event_type::kArrival,
+              .trip_id_ = ice.tripId_,
+              .observed_at_seconds_ = scheduled,
+              .scheduled_timestamp_seconds_ = scheduled,
+              .effective_ = {.source_ = vehicle_prediction_source::kGps,
+                             .predicted_timestamp_seconds_ = scheduled + 625,
+                             .delay_seconds_ = 625},
+              .selected_source_ = vehicle_prediction_source::kGps,
+              .selection_reason_ =
+                  vehicle_prediction_selection_reason::kGpsOnly}},
+            scheduled);
+    auto const exact_boundary = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T22:55:20.000Z&arriveBy=true&direction=LATER&n=1");
+    ASSERT_EQ(1U, exact_boundary.stopTimes_.size());
+    EXPECT_EQ(ice.tripId_, exact_boundary.stopTimes_.front().tripId_);
+
+    auto const exact_window = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T22:55:20.000Z&arriveBy=true&direction=LATER"
+        "&window=30");
+    ASSERT_EQ(1U, exact_window.stopTimes_.size());
+    EXPECT_EQ(ice.tripId_, exact_window.stopTimes_.front().tripId_);
+
+    auto const outside_exact_window = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T22:55:00.000Z&arriveBy=true&direction=LATER"
+        "&window=20");
+    EXPECT_TRUE(std::ranges::none_of(outside_exact_window.stopTimes_,
+                                     [&](auto const& stop_time) {
+                                       return stop_time.tripId_ == ice.tripId_;
+                                     }));
   }
 
   {

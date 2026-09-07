@@ -4,6 +4,7 @@
 #include <chrono>
 
 #include "net/bad_request_exception.h"
+#include "net/too_many_exception.h"
 
 #include "utl/verify.h"
 
@@ -13,6 +14,12 @@
 #include "motis/rt/vehicle_position.h"
 
 namespace motis::ep {
+
+namespace {
+
+constexpr auto kMaxVehicleResults = std::size_t{10'000U};
+
+}
 
 api::VehiclePositionsResponse vehicles::operator()(
     boost::urls::url_view const& url) const {
@@ -40,21 +47,25 @@ api::VehiclePositionsResponse vehicles::operator()(
   auto const max_age = query.maxAge_.value_or(default_max_age.count());
   utl::verify<net::bad_request_exception>(
       max_age >= 0, "maxAge must be greater than or equal to zero");
-  auto const now =
-      std::chrono::duration_cast<std::chrono::seconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count();
+  auto const now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
   auto const cutoff = vehicle_matching::freshness_cutoff(now, max_age);
-  auto const snapshot = rt->vehicle_positions_->snapshot(
-      vehicle_positions::vehicle_viewport{.min_ = min->pos_, .max_ = max->pos_},
-      std::nullopt);
-  res.vehicles_.reserve(snapshot.size());
-  for (auto const& vehicle : snapshot) {
-    if (!vehicle_matching::is_fresh(vehicle, cutoff)) {
+  auto const viewport =
+      vehicle_positions::vehicle_viewport{.min_ = min->pos_, .max_ = max->pos_};
+  res.vehicles_.reserve(
+      std::min(rt->vehicle_positions_->all().size(), kMaxVehicleResults));
+  auto candidate_count = std::size_t{0U};
+  for (auto const& vehicle : rt->vehicle_positions_->all()) {
+    if (!viewport.contains(vehicle.reported_position_.pos_) ||
+        !vehicle_matching::is_fresh(vehicle, cutoff, now)) {
       continue;
     }
-    auto details = vehicle_matching::resolve_details(
-        tags_, tt_, rtt, shapes_, vehicle, query.language_);
+    utl::verify<net::too_many_exception>(candidate_count < kMaxVehicleResults,
+                                         "too many vehicles");
+    ++candidate_count;
+    auto details = vehicle_matching::resolve_details(tags_, tt_, rtt, shapes_,
+                                                     vehicle, query.language_);
     if (!query.includeUnmatched_ &&
         details.match_state_ == api::VehicleMatchStateEnum::UNMATCHED) {
       continue;

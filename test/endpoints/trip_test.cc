@@ -1,5 +1,7 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
+
 #include "utl/init_from.h"
 
 #include "nigiri/common/parse_time.h"
@@ -297,6 +299,105 @@ TEST(motis, trip_stop_naming) {
   EXPECT_EQ("Vers Parent Deux", leg_fr.headsign_);
   EXPECT_EQ("FR_SHORT_NAME", leg_fr.routeShortName_);
   EXPECT_EQ("FR-R1", leg_fr.routeLongName_);
+}
+
+TEST(motis, trip_prediction_events_follow_scheduled_skipped_stop_filter) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/trip-skipped-stop-data", ec);
+  auto gtfs = std::string{kGTFS};
+  auto const scheduled_mid_stop =
+      std::string{"T1,10:10:00,10:10:00,Child1B,2,0,0,Midway"};
+  auto const skipped_mid_stop =
+      std::string{"T1,10:10:00,10:10:00,Child1B,2,1,1,Midway"};
+  auto const pos = gtfs.find(scheduled_mid_stop);
+  ASSERT_NE(pos, std::string::npos);
+  gtfs.replace(pos, scheduled_mid_stop.size(), skipped_mid_stop);
+
+  auto const c = config{
+      .timetable_ = config::timetable{.first_day_ = "2019-05-01",
+                                      .num_days_ = 2,
+                                      .datasets_ = {{"test", {.path_ = gtfs}}}},
+      .street_routing_ = false};
+  import(c, "test/trip-skipped-stop-data");
+  auto d = data{"test/trip-skipped-stop-data", c};
+  auto const endpoint = utl::init_from<ep::trip>(d).value();
+
+  auto const filtered =
+      endpoint("/api/v6/trip?tripId=20190501_10%3A00_test_T1");
+  ASSERT_EQ(filtered.legs_.size(), 1U);
+  ASSERT_TRUE(filtered.legs_.front().intermediateStops_.has_value());
+  EXPECT_TRUE(filtered.legs_.front().intermediateStops_->empty());
+  ASSERT_TRUE(filtered.intermediateStopEvents_.has_value());
+  EXPECT_TRUE(filtered.intermediateStopEvents_->empty());
+
+  auto const included = endpoint(
+      "/api/v6/trip?tripId=20190501_10%3A00_test_T1"
+      "&withScheduledSkippedStops=true");
+  ASSERT_EQ(included.legs_.size(), 1U);
+  ASSERT_TRUE(included.legs_.front().intermediateStops_.has_value());
+  EXPECT_EQ(included.legs_.front().intermediateStops_->size(), 1U);
+  ASSERT_TRUE(included.intermediateStopEvents_.has_value());
+  EXPECT_EQ(included.intermediateStopEvents_->size(), 1U);
+}
+
+TEST(motis, trip_vehicle_matches_requested_interlined_segment) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/trip-interlined-vehicle-data", ec);
+  auto const c =
+      config{.timetable_ =
+                 config::timetable{
+                     .first_day_ = "2019-05-01",
+                     .num_days_ = 2,
+                     .datasets_ = {{"test", {.path_ = kInterlinedGTFS}}}},
+             .street_routing_ = false};
+  import(c, "test/trip-interlined-vehicle-data");
+  auto d = data{"test/trip-interlined-vehicle-data", c};
+  auto const endpoint = utl::init_from<ep::trip>(d).value();
+  auto const now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+  auto const vehicle = [&](std::string entity_id, std::string trip_id,
+                           std::string start_time, std::string route_id,
+                           std::string stop_id, double const longitude) {
+    return vehicle_positions::vehicle_position{
+        .feed_id_ = "test",
+        .entity_id_ = std::move(entity_id),
+        .vehicle_ = {.id_ = std::string{"vehicle-"}.append(trip_id)},
+        .trip_ = {.trip_id_ = std::move(trip_id),
+                  .start_date_ = "20190501",
+                  .start_time_ = std::move(start_time),
+                  .route_id_ = std::move(route_id),
+                  .direction_id_ = 0U},
+        .reported_position_ = {.pos_ = geo::latlng{50.0, longitude}},
+        .current_stop_sequence_ = 1U,
+        .stop_id_ = std::move(stop_id),
+        .reported_time_ = now,
+        .ingested_time_ = now};
+  };
+  d.rt_->vehicle_positions_->replace_feed(
+      "test",
+      {vehicle("first-vehicle", "first", "10:00:00", "R1", "A", 8.0),
+       vehicle("middle-vehicle", "middle", "10:10:00", "R2", "B", 8.01)});
+
+  auto const separate = endpoint(
+      "/api/v6/trip?tripId=20190501_10%3A10_test_middle"
+      "&joinInterlinedLegs=false");
+  ASSERT_EQ(separate.legs_.size(), 3U);
+  auto const middle_leg =
+      std::ranges::find_if(separate.legs_, [](auto const& leg) {
+        return leg.tripId_ == "20190501_10:10_test_middle";
+      });
+  ASSERT_NE(middle_leg, end(separate.legs_));
+  ASSERT_TRUE(middle_leg->primaryVehicle_.has_value());
+  EXPECT_EQ(middle_leg->primaryVehicle_->entityId_, "middle-vehicle");
+  EXPECT_FALSE(separate.legs_.front().primaryVehicle_.has_value());
+
+  auto const joined = endpoint(
+      "/api/v6/trip?tripId=20190501_10%3A10_test_middle"
+      "&joinInterlinedLegs=true");
+  ASSERT_EQ(joined.legs_.size(), 1U);
+  ASSERT_TRUE(joined.legs_.front().primaryVehicle_.has_value());
+  EXPECT_EQ(joined.legs_.front().primaryVehicle_->entityId_, "middle-vehicle");
 }
 
 TEST(motis, trip_prediction_provenance_uses_each_interlined_leg) {

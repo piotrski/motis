@@ -38,6 +38,7 @@ api::PredictionSourceEnum prediction_source(
     case vehicle_prediction_source::kSchedule:
       return api::PredictionSourceEnum::SCHEDULE;
   }
+  std::unreachable();
 }
 
 std::optional<api::PredictionContextEnum> prediction_context(
@@ -69,11 +70,13 @@ api::SelectedPrediction selected_prediction(
     vehicle_prediction_diagnostics_store const* const diagnostics) {
   auto const stop = run[stop_idx];
   auto const scheduled = to_seconds(stop.scheduled_time(event_type));
+  auto const sequence = static_stop_sequence(
+      tt, run.t_.t_idx_, stop.get_trip_idx(event_type), stop.stop_idx_);
   auto const* entry =
-      diagnostics == nullptr
+      diagnostics == nullptr || !sequence.has_value()
           ? nullptr
           : diagnostics->find_event(
-                run.t_, tags.id(tt, stop, event_type), scheduled,
+                run.t_, tags.id(tt, stop, event_type), *sequence, scheduled,
                 event_type == n::event_type::kArr
                     ? vehicle_prediction_event_type::kArrival
                     : vehicle_prediction_event_type::kDeparture);
@@ -134,8 +137,10 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
                                         "trip not found: tripId={}, tt={}",
                                         query.tripId_, tt_.external_interval());
 
-  auto fr = n::rt::frun{tt_, rtt, r};
-  auto const requested_trip_id = tags_.id(tt_, fr[0U], n::event_type::kDep);
+  auto const requested_fr = n::rt::frun{tt_, rtt, r};
+  auto const requested_trip_id =
+      tags_.id(tt_, requested_fr[0U], n::event_type::kDep);
+  auto fr = requested_fr;
   fr.stop_range_.to_ = fr.size();
   fr.stop_range_.from_ = 0U;
   auto const from_l = fr[0];
@@ -178,9 +183,15 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
       config_.timetable_.value().max_matching_distance_, kMaxMatchingDistance,
       api_version, false, false, query.language_, nullptr);
   if (rt->vehicle_positions_ != nullptr && !response.legs_.empty()) {
-    response.legs_.front().primaryVehicle_ = vehicle_matching::primary_vehicle(
-        tags_, tt_, rtt, shapes_, *rt->vehicle_positions_, fr, freshness_cutoff,
-        query.language_);
+    auto const leg = query.joinInterlinedLegs_
+                         ? begin(response.legs_)
+                         : std::ranges::find(response.legs_, requested_trip_id,
+                                             &api::Leg::tripId_);
+    if (leg != end(response.legs_)) {
+      leg->primaryVehicle_ = vehicle_matching::primary_vehicle(
+          tags_, tt_, rtt, shapes_, *rt->vehicle_positions_, requested_fr,
+          freshness_cutoff, now, query.language_);
+    }
   }
   if (api_version >= 6) {
     auto const prediction = [&](n::stop_idx_t const stop_idx,
@@ -194,16 +205,22 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
     auto intermediate = std::vector<api::IntermediateStopEvent>{};
     intermediate.reserve(fr.size() > 2U ? fr.size() - 2U : 0U);
     for (auto i = n::stop_idx_t{1U}; i + 1U < fr.size(); ++i) {
+      auto const stop = fr[i];
+      if (!query.withScheduledSkippedStops_ &&
+          !stop.get_scheduled_stop().in_allowed() &&
+          !stop.get_scheduled_stop().out_allowed() && !stop.in_allowed() &&
+          !stop.out_allowed()) {
+        continue;
+      }
       intermediate.push_back(
           {.place_ = to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
-                              matches_, ae_, tz_, query.language_, fr[i]),
+                              matches_, ae_, tz_, query.language_, stop),
            .arrivalPrediction_ = prediction(i, n::event_type::kArr),
            .departurePrediction_ = prediction(i, n::event_type::kDep)});
     }
     response.intermediateStopEvents_ = std::move(intermediate);
     response.incomingLegPrediction_ = incoming_leg_prediction(
-        fr.t_, requested_trip_id,
-        rt->vehicle_prediction_diagnostics_.get());
+        fr.t_, requested_trip_id, rt->vehicle_prediction_diagnostics_.get());
   }
   return response;
 }

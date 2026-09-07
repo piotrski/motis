@@ -606,6 +606,113 @@ export const ReachableSchema = {
     }
 } as const;
 
+export const StopTimesV6DirectionSchema = {
+    type: 'string',
+    enum: ['EARLIER', 'LATER']
+} as const;
+
+export const PredictionSourceSchema = {
+    type: 'string',
+    enum: ['PROVIDER', 'GPS', 'SCHEDULE']
+} as const;
+
+export const PredictionEventTypeSchema = {
+    type: 'string',
+    enum: ['ARRIVAL', 'DEPARTURE']
+} as const;
+
+export const PredictionContextSchema = {
+    type: 'string',
+    enum: ['DIRECT', 'INCOMING_BLOCK_LEG']
+} as const;
+
+export const SelectedPredictionSchema = {
+    type: 'object',
+    required: ['source', 'time', 'scheduledTime', 'delaySeconds', 'eventType'],
+    properties: {
+        source: {
+            '$ref': '#/components/schemas/PredictionSource'
+        },
+        time: {
+            type: 'string',
+            description: 'Exact RFC 3339 timestamp with second precision.'
+        },
+        scheduledTime: {
+            type: 'string',
+            description: 'Exact RFC 3339 scheduled timestamp with second precision.'
+        },
+        delaySeconds: {
+            type: 'integer',
+            format: 'int64'
+        },
+        confidence: {
+            type: 'number',
+            format: 'double'
+        },
+        referenceTime: {
+            type: 'string',
+            description: 'Exact RFC 3339 candidate reference timestamp.'
+        },
+        eventType: {
+            '$ref': '#/components/schemas/PredictionEventType'
+        },
+        context: {
+            description: 'Present when the prediction carries additional provenance. An absent value is equivalent to DIRECT.',
+            '$ref': '#/components/schemas/PredictionContext'
+        }
+    }
+} as const;
+
+export const IncomingLegPredictionSchema = {
+    type: 'object',
+    required: ['source', 'context', 'incomingTripId', 'nextTripId', 'routeId', 'routeShortName', 'headsign', 'mode', 'expectedTerminalArrival', 'nextScheduledDeparture', 'propagatedDelaySeconds', 'referenceTime'],
+    properties: {
+        source: {
+            '$ref': '#/components/schemas/PredictionSource'
+        },
+        context: {
+            '$ref': '#/components/schemas/PredictionContext'
+        },
+        incomingTripId: {
+            type: 'string'
+        },
+        nextTripId: {
+            type: 'string'
+        },
+        routeId: {
+            type: 'string'
+        },
+        routeShortName: {
+            type: 'string'
+        },
+        headsign: {
+            type: 'string'
+        },
+        mode: {
+            '$ref': '#/components/schemas/Mode'
+        },
+        expectedTerminalArrival: {
+            type: 'string',
+            format: 'date-time',
+            description: 'Exact RFC 3339 predicted arrival of the incoming leg.'
+        },
+        nextScheduledDeparture: {
+            type: 'string',
+            format: 'date-time',
+            description: 'Exact RFC 3339 scheduled departure of this leg.'
+        },
+        propagatedDelaySeconds: {
+            type: 'integer',
+            format: 'int64'
+        },
+        referenceTime: {
+            type: 'string',
+            format: 'date-time',
+            description: 'Exact RFC 3339 reference timestamp of the incoming GPS prediction.'
+        }
+    }
+} as const;
+
 export const StopTimeSchema = {
     description: 'departure or arrival event at a stop',
     type: 'object',
@@ -714,6 +821,136 @@ Stops on the trips after this stop. Returned only if \`fetchStop\` is \`true\` a
         source: {
             description: 'Filename and line number where this trip is from',
             type: 'string'
+        },
+        selectedPrediction: {
+            description: `Exact selected event prediction. Present on v6 responses and
+omitted from legacy API versions.
+`,
+            '$ref': '#/components/schemas/SelectedPrediction'
+        }
+    }
+} as const;
+
+export const PredictionSelectionReasonSchema = {
+    type: 'string',
+    enum: ['PROVIDER_ONLY', 'GPS_ONLY', 'PROVIDER_HIGHER_CONFIDENCE', 'GPS_HIGHER_CONFIDENCE', 'PROVIDER_PROGRESS_INCONSISTENT', 'PROVIDER_RECOVERY_PENDING', 'PROVIDER_RECOVERED', 'SOURCE_HYSTERESIS', 'NO_USABLE_CANDIDATE', 'POLICY_UNAVAILABLE']
+} as const;
+
+export const PredictionRejectionReasonSchema = {
+    type: 'string',
+    enum: ['STALE', 'LOW_CONFIDENCE', 'PHYSICALLY_UNREACHABLE', 'TIMESTAMP_NOT_COMPARABLE', 'PROGRESS_NOT_COMPARABLE', 'PROGRESS_INCONSISTENT']
+} as const;
+
+export const GpsEstimationRejectionReasonSchema = {
+    description: 'Debug-only reason the vehicle-position ETA estimator could not produce a GPS candidate. Distinct from PredictionRejectionReason, which applies after a candidate reaches source selection.',
+    type: 'string',
+    enum: ['MISSING_TRIP_ID', 'UNRESOLVED_TRIP', 'UNSCHEDULED_TRIP', 'UNSUPPORTED_TRIP_RELATIONSHIP', 'INSUFFICIENT_HISTORY', 'STALE_HISTORY', 'MISSING_SHAPE', 'OFF_SHAPE', 'AMBIGUOUS_PROGRESS', 'NON_MONOTONIC_PROGRESS', 'INVALID_OBSERVATION_TIME', 'IMPOSSIBLE_SPEED', 'IMPOSSIBLE_TRAVEL_TIME', 'TERMINAL']
+} as const;
+
+export const PredictionCandidateSchema = {
+    type: 'object',
+    required: ['source', 'time', 'delaySeconds'],
+    properties: {
+        source: {
+            '$ref': '#/components/schemas/PredictionSource'
+        },
+        time: {
+            description: 'Predicted Unix timestamp in seconds.',
+            type: 'integer',
+            format: 'int64'
+        },
+        delaySeconds: {
+            type: 'integer',
+            format: 'int64'
+        },
+        confidence: {
+            type: 'number',
+            format: 'double'
+        },
+        referenceTime: {
+            description: 'Candidate reference Unix timestamp in seconds.',
+            type: 'integer',
+            format: 'int64'
+        }
+    }
+} as const;
+
+export const PredictionDebugSchema = {
+    type: 'object',
+    required: ['stopTimeIndex', 'tripId', 'stopSequence', 'selectedSource', 'selectionReason', 'effective', 'sourceTransition', 'providerRecovery', 'flap', 'providerConsistentCycles'],
+    properties: {
+        stopTimeIndex: {
+            type: 'integer',
+            minimum: 0
+        },
+        tripId: {
+            type: 'string'
+        },
+        stopSequence: {
+            type: 'integer',
+            minimum: 0
+        },
+        selectedSource: {
+            '$ref': '#/components/schemas/PredictionSource'
+        },
+        selectionReason: {
+            '$ref': '#/components/schemas/PredictionSelectionReason'
+        },
+        provider: {
+            '$ref': '#/components/schemas/PredictionCandidate'
+        },
+        gps: {
+            '$ref': '#/components/schemas/PredictionCandidate'
+        },
+        effective: {
+            '$ref': '#/components/schemas/PredictionCandidate'
+        },
+        selectedConfidence: {
+            type: 'number',
+            format: 'double'
+        },
+        providerRejection: {
+            '$ref': '#/components/schemas/PredictionRejectionReason'
+        },
+        gpsRejection: {
+            '$ref': '#/components/schemas/PredictionRejectionReason'
+        },
+        gpsEstimationRejection: {
+            '$ref': '#/components/schemas/GpsEstimationRejectionReason'
+        },
+        context: {
+            description: 'Present for predictions propagated from an incoming block leg. An absent value is equivalent to DIRECT.',
+            '$ref': '#/components/schemas/PredictionContext'
+        },
+        latestVehicleObservationTime: {
+            description: 'Latest vehicle observation Unix timestamp in seconds.',
+            type: 'integer',
+            format: 'int64'
+        },
+        candidateTimestampSkewSeconds: {
+            type: 'integer',
+            format: 'int64'
+        },
+        projectionErrorMeters: {
+            type: 'number',
+            format: 'double'
+        },
+        progressDifferenceMeters: {
+            type: 'number',
+            format: 'double'
+        },
+        sourceTransition: {
+            type: 'boolean'
+        },
+        providerRecovery: {
+            type: 'boolean'
+        },
+        flap: {
+            type: 'boolean'
+        },
+        providerConsistentCycles: {
+            type: 'integer',
+            minimum: 0
         }
     }
 } as const;
@@ -1324,6 +1561,196 @@ export const RentalVehicleSchema = {
     }
 } as const;
 
+export const TransitVehicleRouteInfoSchema = {
+    type: 'object',
+    required: ['id', 'shortName', 'longName'],
+    properties: {
+        id: {
+            type: 'string'
+        },
+        shortName: {
+            type: 'string'
+        },
+        longName: {
+            type: 'string'
+        },
+        color: {
+            type: 'string'
+        },
+        textColor: {
+            type: 'string'
+        }
+    }
+} as const;
+
+export const VehicleShapeSourceSchema = {
+    type: 'string',
+    enum: ['NONE', 'TIMETABLE', 'ROUTED']
+} as const;
+
+export const TransitVehicleDescriptorSchema = {
+    type: 'object',
+    properties: {
+        id: {
+            type: 'string'
+        },
+        label: {
+            type: 'string'
+        },
+        licensePlate: {
+            type: 'string'
+        },
+        wheelchairAccessible: {
+            type: 'string'
+        }
+    }
+} as const;
+
+export const TransitVehicleTripDescriptorSchema = {
+    type: 'object',
+    properties: {
+        tripId: {
+            type: 'string'
+        },
+        scheduledTripId: {
+            type: 'string',
+            description: 'Resolved MOTIS trip id for the static/realtime run when the vehicle can be matched to the timetable.'
+        },
+        startDate: {
+            type: 'string'
+        },
+        startTime: {
+            type: 'string'
+        },
+        routeId: {
+            type: 'string'
+        },
+        headsign: {
+            type: 'string',
+            description: 'Passenger-facing trip headsign resolved from the static timetable when available.'
+        },
+        directionId: {
+            type: 'integer',
+            format: 'int64'
+        },
+        scheduleRelationship: {
+            type: 'string'
+        }
+    }
+} as const;
+
+export const ReportedVehiclePositionSchema = {
+    type: 'object',
+    required: ['lat', 'lon'],
+    properties: {
+        lat: {
+            description: 'latitude',
+            type: 'number'
+        },
+        lon: {
+            description: 'longitude',
+            type: 'number'
+        },
+        bearing: {
+            description: 'Bearing in degrees.',
+            type: 'number'
+        },
+        speedMps: {
+            description: 'Speed in meters per second.',
+            type: 'number'
+        }
+    }
+} as const;
+
+export const VehicleMatchStateSchema = {
+    type: 'string',
+    enum: ['MATCHED_TRIP', 'MATCHED_ROUTE_ONLY', 'UNMATCHED']
+} as const;
+
+export const VehiclePositionSchema = {
+    type: 'object',
+    required: ['feedId', 'entityId', 'vehicle', 'trip', 'matchState', 'reportedPosition', 'ingestedTime'],
+    properties: {
+        feedId: {
+            type: 'string',
+            description: 'Realtime feed identity for this vehicle position.'
+        },
+        entityId: {
+            type: 'string',
+            description: 'GTFS Realtime FeedEntity id.'
+        },
+        vehicle: {
+            '$ref': '#/components/schemas/TransitVehicleDescriptor'
+        },
+        trip: {
+            '$ref': '#/components/schemas/TransitVehicleTripDescriptor'
+        },
+        matchState: {
+            '$ref': '#/components/schemas/VehicleMatchState',
+            description: 'Timetable matching tier reached for this vehicle.'
+        },
+        route: {
+            '$ref': '#/components/schemas/TransitVehicleRouteInfo',
+            description: 'Passenger-facing route metadata for marker labels and colors when resolvable.'
+        },
+        reportedPosition: {
+            '$ref': '#/components/schemas/ReportedVehiclePosition'
+        },
+        mode: {
+            '$ref': '#/components/schemas/Mode',
+            description: 'Transit mode for this vehicle when resolvable.'
+        },
+        shape: {
+            '$ref': '#/components/schemas/EncodedPolyline',
+            description: 'Encoded trip or route shape for map animation when resolvable.'
+        },
+        shapeId: {
+            type: 'string',
+            description: 'Stable identifier for caching the encoded shape across position polls.'
+        },
+        shapeSource: {
+            '$ref': '#/components/schemas/VehicleShapeSource',
+            description: 'Source of the returned shape.'
+        },
+        currentStopSequence: {
+            type: 'integer',
+            format: 'int64'
+        },
+        stopId: {
+            type: 'string'
+        },
+        currentStatus: {
+            type: 'string'
+        },
+        occupancyStatus: {
+            type: 'string'
+        },
+        reportedTime: {
+            type: 'integer',
+            format: 'int64',
+            description: 'VehiclePosition timestamp from the realtime feed as Unix seconds.'
+        },
+        ingestedTime: {
+            type: 'integer',
+            format: 'int64',
+            description: 'Server ingest timestamp as Unix seconds.'
+        }
+    }
+} as const;
+
+export const VehiclePositionsResponseSchema = {
+    type: 'object',
+    required: ['vehicles'],
+    properties: {
+        vehicles: {
+            type: 'array',
+            items: {
+                '$ref': '#/components/schemas/VehiclePosition'
+            }
+        }
+    }
+} as const;
+
 export const RentalZoneSchema = {
     type: 'object',
     required: ['providerId', 'providerGroupId', 'z', 'bbox', 'area', 'rules'],
@@ -1500,6 +1927,19 @@ For non-transit legs, null
         },
         tripId: {
             type: 'string'
+        },
+        primaryVehicle: {
+            description: `Deterministically selected live vehicle for this transit leg when
+a current VehiclePosition can be matched to its trip.
+`,
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/VehiclePosition'
+                },
+                {
+                    type: 'null'
+                }
+            ]
         },
         routeShortName: {
             type: 'string'
@@ -1741,6 +2181,22 @@ and the inner array as OR (you can choose which ticket to buy)
     }
 } as const;
 
+export const IntermediateStopEventSchema = {
+    type: 'object',
+    required: ['place'],
+    properties: {
+        place: {
+            '$ref': '#/components/schemas/Place'
+        },
+        arrivalPrediction: {
+            '$ref': '#/components/schemas/SelectedPrediction'
+        },
+        departurePrediction: {
+            '$ref': '#/components/schemas/SelectedPrediction'
+        }
+    }
+} as const;
+
 export const ItinerarySchema = {
     type: 'object',
     required: ['duration', 'startTime', 'endTime', 'transfers', 'legs'],
@@ -1776,6 +2232,22 @@ export const ItinerarySchema = {
             items: {
                 '$ref': '#/components/schemas/FareTransfer'
             }
+        },
+        startPrediction: {
+            '$ref': '#/components/schemas/SelectedPrediction'
+        },
+        endPrediction: {
+            '$ref': '#/components/schemas/SelectedPrediction'
+        },
+        intermediateStopEvents: {
+            type: 'array',
+            items: {
+                '$ref': '#/components/schemas/IntermediateStopEvent'
+            }
+        },
+        incomingLegPrediction: {
+            description: 'GPS timing propagated from the immediately preceding trip on the same block. Present only on v6 trip responses while that context is selected and fresh.',
+            '$ref': '#/components/schemas/IncomingLegPrediction'
         }
     }
 } as const;
@@ -2339,6 +2811,20 @@ export const RouteInfoSchema = {
             items: {
                 '$ref': '#/components/schemas/RouteSegment'
             }
+        }
+    }
+} as const;
+
+export const HealthResponseSchema = {
+    type: 'object',
+    properties: {
+        rt: {
+            type: 'boolean',
+            description: 'GTFSRT, SIRI Lite, VDV AUS, VDV454 feeds.'
+        },
+        gbfs: {
+            type: 'boolean',
+            description: 'GBFS feeds.'
         }
     }
 } as const;

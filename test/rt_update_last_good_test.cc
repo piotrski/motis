@@ -158,9 +158,9 @@ struct response_server {
     if (!wake_ec) {
       wake_socket.connect(endpoint, wake_ec);
       if (!wake_ec) {
-        constexpr auto const wake_request =
-            std::string_view{"GET /shutdown HTTP/1.1\r\n"
-                             "Host: 127.0.0.1\r\nConnection: close\r\n\r\n"};
+        constexpr auto const wake_request = std::string_view{
+            "GET /shutdown HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\nConnection: close\r\n\r\n"};
         boost::asio::write(wake_socket, boost::asio::buffer(wake_request),
                            wake_ec);
       }
@@ -554,8 +554,8 @@ TEST(motis_rt_update,
           .first_day_ = first_day,
           .num_days_ = 2,
           .update_interval_ = 60,
-          .datasets_ = {{"test",
-                         {.path_ = gtfs, .rt_ = {{{.url_ = server.url()}}}}}}}}};
+          .datasets_ = {
+              {"test", {.path_ = gtfs, .rt_ = {{{.url_ = server.url()}}}}}}}}};
   import(c, "data");
   auto d = data{"data", c};
 
@@ -872,11 +872,10 @@ TEST(motis_rt_update, canned_feed_accepts_archived_header_timestamp) {
           .num_days_ = 3,
           .update_interval_ = 60,
           .canned_rt_ = true,
-          .datasets_ = {
-              {"test",
-               {.path_ = gtfs,
-                .rt_ = {{{.url_ = "https://example.test/trip_updates",
-                          .last_good_ttl_ = 60U}}}}}}}}};
+          .datasets_ = {{"test",
+                         {.path_ = gtfs,
+                          .rt_ = {{{.url_ = "https://example.test/trip_updates",
+                                    .last_good_ttl_ = 60U}}}}}}}}};
   import(c, "data");
   auto d = data{"data", c};
   fs::create_directory("dump_rt");
@@ -1060,8 +1059,7 @@ TEST(motis_rt_update, fresh_last_good_survives_bad_cycle_and_expires) {
   EXPECT_TRUE(
       unchanged_after_expired_differential.stopTimes_.front().realTime_);
   EXPECT_EQ(static_cast<std::chrono::sys_seconds>(
-                *unchanged_after_expired_differential.stopTimes_
-                     .front()
+                *unchanged_after_expired_differential.stopTimes_.front()
                      .place_.departure_),
             today + 11h + 5min);
 
@@ -1127,13 +1125,12 @@ TEST(motis_rt_update,
           .update_interval_ = 1,
           .incremental_rt_update_ = true,
           .canned_rt_ = true,
-          .datasets_ = {
-              {"test",
-               {.path_ = gtfs,
-                .rt_ = {{{.url_ = "https://example.test/first",
-                          .last_good_ttl_ = 2U},
-                         {.url_ = "https://example.test/second",
-                          .last_good_ttl_ = 30U}}}}}}}}};
+          .datasets_ = {{"test",
+                         {.path_ = gtfs,
+                          .rt_ = {{{.url_ = "https://example.test/first",
+                                    .last_good_ttl_ = 2U},
+                                   {.url_ = "https://example.test/second",
+                                    .last_good_ttl_ = 30U}}}}}}}}};
   import(c, "data");
   auto d = data{"data", c};
   fs::create_directory("dump_rt");
@@ -1265,11 +1262,10 @@ TEST(motis_rt_update,
   ioc.run_for(1100ms);
   auto const after_gtfsrt_differential_deletion = query_stop_times(d);
   ASSERT_EQ(after_gtfsrt_differential_deletion.stopTimes_.size(), 1U);
-  EXPECT_EQ(
-      static_cast<std::chrono::sys_seconds>(
-          *after_gtfsrt_differential_deletion.stopTimes_.front()
-               .place_.departure_),
-      today + 10h + 7min);
+  EXPECT_EQ(static_cast<std::chrono::sys_seconds>(
+                *after_gtfsrt_differential_deletion.stopTimes_.front()
+                     .place_.departure_),
+            today + 10h + 7min);
 
   write_dump("trip_updates", gtfsrt.SerializeAsString());
   ioc.restart();
@@ -1283,11 +1279,10 @@ TEST(motis_rt_update,
   ioc.run_for(1100ms);
   auto const after_authoritative_gtfsrt_deletion = query_stop_times(d);
   ASSERT_EQ(after_authoritative_gtfsrt_deletion.stopTimes_.size(), 1U);
-  EXPECT_EQ(
-      static_cast<std::chrono::sys_seconds>(
-          *after_authoritative_gtfsrt_deletion.stopTimes_.front()
-               .place_.departure_),
-      today + 10h + 7min);
+  EXPECT_EQ(static_cast<std::chrono::sys_seconds>(
+                *after_authoritative_gtfsrt_deletion.stopTimes_.front()
+                     .place_.departure_),
+            today + 10h + 7min);
 
   gtfsrt.mutable_entity(0)
       ->mutable_trip_update()
@@ -1386,8 +1381,7 @@ service-1,1,1,1,1,1,1,1,{},{}
 
   auto current_time = std::chrono::system_clock::time_point{today + 12h};
   auto ioc = boost::asio::io_context{};
-  run_rt_update(ioc, c, d,
-                {.now_ = [&current_time] { return current_time; }});
+  run_rt_update(ioc, c, d, {.now_ = [&current_time] { return current_time; }});
   ioc.run_for(100ms);
   EXPECT_EQ(d.rt_->rtt_->base_day_, today);
   EXPECT_EQ(d.auser_->at("https://example.test/auser").update_state_, 1);
@@ -1398,11 +1392,10 @@ service-1,1,1,1,1,1,1,1,{},{}
   ioc.run_for(1100ms);
   EXPECT_EQ(d.rt_->rtt_->base_day_, tomorrow);
   EXPECT_EQ(d.auser_->at("https://example.test/auser").update_state_, 0);
-  auto const after_failed_rollover =
-      utl::init_from<ep::stop_times>(d).value()(
-          std::format("/api/v5/stoptimes?stopId=test_stop-1"
-                      "&time={}T09:00:00Z&n=1",
-                      date::format("%F", tomorrow)));
+  auto const after_failed_rollover = utl::init_from<ep::stop_times>(d).value()(
+      std::format("/api/v5/stoptimes?stopId=test_stop-1"
+                  "&time={}T09:00:00Z&n=1",
+                  date::format("%F", tomorrow)));
   EXPECT_TRUE(after_failed_rollover.stopTimes_.empty() ||
               !after_failed_rollover.stopTimes_.front().realTime_);
 
@@ -1428,7 +1421,5 @@ TEST(motis_rt_update, mixed_auser_resynchronizes_on_service_day_rollover) {
 TEST(motis_rt_update, auser_only_resynchronizes_on_service_day_rollover) {
   test_auser_resynchronizes_on_service_day_rollover(false);
 }
-
-
 
 }  // namespace

@@ -16,6 +16,7 @@
 
 #include "nigiri/rt/frun.h"
 #include "net/bad_request_exception.h"
+#include "net/too_many_exception.h"
 #include "openapi/bad_request_exception.h"
 
 #include "motis/config.h"
@@ -456,6 +457,23 @@ TEST(motis_vehicle_positions, endpoint_accepts_extreme_max_age) {
   EXPECT_EQ(res.vehicles_.front().entityId_, "ancient");
 }
 
+TEST(motis_vehicle_positions, endpoint_bounds_world_viewport_candidates) {
+  auto const c = motis::config{};
+  auto rt = std::make_shared<motis::rt>();
+  auto positions = std::vector<vehicle_position>{};
+  positions.reserve(10'001U);
+  for (auto i = 0U; i != 10'001U; ++i) {
+    positions.emplace_back(
+        position("feed", std::to_string(i), 50.061, 19.938, unix_now()));
+  }
+  rt->vehicle_positions_->replace_feed("feed", std::move(positions));
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  EXPECT_THROW(endpoint("/api/v1/map/vehicles?min=-90,-180&max=90,180"
+                        "&includeUnmatched=true"),
+               net::too_many_exception);
+}
+
 TEST(motis_vehicle_positions, freshness_cutoff_is_saturating_and_inclusive) {
   auto constexpr kMin = std::numeric_limits<std::int64_t>::min();
   EXPECT_EQ(motis::vehicle_matching::freshness_cutoff(kMin + 5, 10), kMin);
@@ -464,9 +482,9 @@ TEST(motis_vehicle_positions, freshness_cutoff_is_saturating_and_inclusive) {
             kMin + 101);
 
   auto at_cutoff = position("feed", "boundary", 50.061, 19.938, 40);
-  EXPECT_TRUE(motis::vehicle_matching::is_fresh(at_cutoff, 40));
+  EXPECT_TRUE(motis::vehicle_matching::is_fresh(at_cutoff, 40, 40));
   at_cutoff.ingested_time_ = 39;
-  EXPECT_FALSE(motis::vehicle_matching::is_fresh(at_cutoff, 40));
+  EXPECT_FALSE(motis::vehicle_matching::is_fresh(at_cutoff, 40, 40));
 }
 
 TEST(motis_vehicle_positions, dataset_tag_preserves_colons_before_feed_hash) {
@@ -648,7 +666,7 @@ TEST(motis_vehicle_positions, rt_update_consumes_vehicle_only_gtfsrt_feed) {
     store.replace_feed("test", std::move(candidates));
     return motis::vehicle_matching::primary_vehicle(
         *d.tags_, *d.tt_, d.rt_->rtt_.get(), d.shapes_.get(), store, target, 0,
-        nigiri::lang_t{});
+        200, nigiri::lang_t{});
   };
   auto candidate = snapshot.front();
   candidate.feed_id_ = "test";
@@ -667,6 +685,20 @@ TEST(motis_vehicle_positions, rt_update_consumes_vehicle_only_gtfsrt_feed) {
   missing_reported_time.reported_time_ = std::nullopt;
   missing_reported_time.ingested_time_ = 100;
   EXPECT_TRUE(select({missing_reported_time}).has_value());
+
+  auto future_stale_candidate = candidate;
+  future_stale_candidate.entity_id_ = "future-stale";
+  future_stale_candidate.reported_time_ = 1'000;
+  future_stale_candidate.ingested_time_ = -1;
+  EXPECT_FALSE(select({future_stale_candidate}).has_value());
+
+  auto future_candidate = candidate;
+  future_candidate.entity_id_ = "future";
+  future_candidate.reported_time_ = 1'000;
+  future_candidate.ingested_time_ = 99;
+  auto const current_selected = select({future_candidate, candidate});
+  ASSERT_TRUE(current_selected.has_value());
+  EXPECT_EQ(current_selected->entityId_, "entity-1");
 
   auto unrelated = candidate;
   unrelated.entity_id_ = "unrelated";

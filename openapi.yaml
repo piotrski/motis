@@ -1980,6 +1980,41 @@ paths:
                 items:
                   $ref: '#/components/schemas/Match'
 
+  /api/v6/trip:
+    get:
+      tags: [timetable]
+      summary: Get a trip with exact-second selected predictions
+      operationId: tripV6
+      parameters:
+        - name: tripId
+          in: query
+          required: true
+          schema: {type: string}
+        - name: joinInterlinedLegs
+          in: query
+          schema: {type: boolean, default: true}
+        - name: detailedLegs
+          in: query
+          schema: {type: boolean, default: true}
+        - name: withScheduledSkippedStops
+          in: query
+          schema: {type: boolean, default: false}
+        - name: language
+          in: query
+          schema: {type: array, items: {type: string}}
+          explode: false
+      responses:
+        '200':
+          description: Trip itinerary with event predictions
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Itinerary'}
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
   /api/v5/trip:
     get:
       tags:
@@ -2064,6 +2099,95 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /api/v6/stoptimes:
+    get:
+      tags: [timetable]
+      summary: Get exact-second selected departures or arrivals
+      operationId: stoptimesV6
+      parameters:
+        - name: stopId
+          in: query
+          schema: {type: string}
+        - name: center
+          in: query
+          schema: {type: string}
+        - name: time
+          in: query
+          schema: {type: string, format: date-time}
+        - name: arriveBy
+          in: query
+          schema: {type: boolean, default: false}
+        - name: direction
+          in: query
+          schema: {$ref: '#/components/schemas/StopTimesV6Direction'}
+        - name: window
+          in: query
+          schema: {type: integer, minimum: 0}
+        - name: mode
+          in: query
+          schema:
+            type: array
+            items: {$ref: '#/components/schemas/Mode'}
+          explode: false
+        - name: n
+          in: query
+          schema: {type: integer}
+        - name: radius
+          in: query
+          schema: {type: integer}
+        - name: exactRadius
+          in: query
+          schema: {type: boolean, default: false}
+        - name: fetchStops
+          in: query
+          schema: {type: boolean}
+        - name: pageCursor
+          in: query
+          schema: {type: string}
+        - name: withScheduledSkippedStops
+          in: query
+          schema: {type: boolean, default: false}
+        - name: language
+          in: query
+          schema: {type: array, items: {type: string}}
+          explode: false
+        - name: withAlerts
+          in: query
+          schema: {type: boolean, default: true}
+        - name: includePredictionComparison
+          in: query
+          description: |
+            Debug only. Include sparse provider/GPS prediction comparison data.
+            The default response is unchanged when this parameter is omitted or false.
+          schema: {type: boolean, default: false}
+      responses:
+        '200':
+          description: Exact-second departures or arrivals
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stopTimes, place, previousPageCursor, nextPageCursor]
+                properties:
+                  stopTimes:
+                    type: array
+                    items: {$ref: '#/components/schemas/StopTime'}
+                  place: {$ref: '#/components/schemas/Place'}
+                  previousPageCursor: {type: string}
+                  nextPageCursor: {type: string}
+                  predictionDebug:
+                    description: |
+                      Sparse debug data keyed to stopTimes by stopTimeIndex.
+                      Present only when includePredictionComparison=true and matching
+                      diagnostics exist for a returned stop time.
+                    type: array
+                    items: {$ref: '#/components/schemas/PredictionDebug'}
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
 
   /api/v5/stoptimes:
     get:
@@ -2240,6 +2364,16 @@ paths:
             type: boolean
             default: true
 
+        - name: includePredictionComparison
+          in: query
+          required: false
+          description: |
+            Debug only. Include sparse provider/GPS prediction comparison data.
+            The default response is unchanged when this parameter is omitted or false.
+          schema:
+            type: boolean
+            default: false
+
       responses:
         '422':
           description: Unprocessable Entity
@@ -2295,6 +2429,14 @@ paths:
                       Use the cursor to get the next page of results. Insert the cursor into the request and post it to get the next page.
                       The next page is a set of stop times AFTER the last stop time in this result.
                     type: string
+                  predictionDebug:
+                    description: |
+                      Sparse debug data keyed to stopTimes by stopTimeIndex.
+                      Present only when includePredictionComparison=true and matching
+                      diagnostics exist for a returned stop time.
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PredictionDebug'
 
   /api/v5/map/trips:
     get:
@@ -2723,6 +2865,87 @@ paths:
                   zoomFiltered:
                     type: boolean
                     description: Always false for this endpoint.
+
+  /api/v1/map/vehicles:
+    get:
+      tags:
+        - map
+      operationId: vehicles
+      summary: Get public-transit vehicle positions for a map section
+      description: |
+        Returns the latest GTFS Realtime VehiclePosition facts inside the
+        requested viewport. The endpoint is intentionally viewport-bounded and
+        does not expose unbounded feed-wide vehicle search. Timetable enrichment
+        is optional. Unmatched positions are omitted by default and can be
+        included with `includeUnmatched` for feed-quality inspection. Positions
+        older than the server's realtime freshness window are omitted.
+      parameters:
+        - name: min
+          in: query
+          required: true
+          description: latitude,longitude pair of one viewport corner
+          schema:
+            type: string
+        - name: max
+          in: query
+          required: true
+          description: latitude,longitude pair of the opposite viewport corner
+          schema:
+            type: string
+        - name: language
+          in: query
+          required: false
+          description: |
+            language tags as used in OpenStreetMap / GTFS
+            (usually BCP-47 / ISO 639-1, or ISO 639-2 if there's no ISO 639-1)
+          schema:
+            type: array
+            items:
+              type: string
+          explode: false
+        - name: includeShapes
+          in: query
+          required: false
+          description: |
+            Include encoded shape geometry in each vehicle. Set this to false
+            after caching shapes by shapeId to keep frequent position polls small.
+          schema:
+            type: boolean
+            default: true
+        - name: maxAge
+          in: query
+          required: false
+          description: |
+            Maximum vehicle position age in seconds. Age is based on the
+            realtime feed's reported timestamp when present and otherwise on
+            the server ingest timestamp. When omitted, the server uses the
+            larger of 60 seconds and three timetable update intervals.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: includeUnmatched
+          in: query
+          required: false
+          description: |
+            Include vehicle positions that could not be matched to a timetable
+            trip or route. Intended for realtime feed-quality inspection.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '200':
+          description: Vehicle positions in the requested map section
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VehiclePositionsResponse'
 
   /api/v1/rentals:
     get:
@@ -3531,6 +3754,111 @@ components:
           items:
             $ref: "#/components/schemas/ReachablePlace"
 
+    StopTimesV6Direction:
+      type: string
+      enum: [EARLIER, LATER]
+
+    PredictionSource:
+      type: string
+      enum:
+        - PROVIDER
+        - GPS
+        - SCHEDULE
+
+    PredictionEventType:
+      type: string
+      enum:
+        - ARRIVAL
+        - DEPARTURE
+
+    PredictionContext:
+      type: string
+      enum:
+        - DIRECT
+        - INCOMING_BLOCK_LEG
+
+    SelectedPrediction:
+      type: object
+      required:
+        - source
+        - time
+        - scheduledTime
+        - delaySeconds
+        - eventType
+      properties:
+        source:
+          $ref: '#/components/schemas/PredictionSource'
+        time:
+          type: string
+          description: Exact RFC 3339 timestamp with second precision.
+        scheduledTime:
+          type: string
+          description: Exact RFC 3339 scheduled timestamp with second precision.
+        delaySeconds:
+          type: integer
+          format: int64
+        confidence:
+          type: number
+          format: double
+        referenceTime:
+          type: string
+          description: Exact RFC 3339 candidate reference timestamp.
+        eventType:
+          $ref: '#/components/schemas/PredictionEventType'
+        context:
+          description: >-
+            Present when the prediction carries additional provenance. An
+            absent value is equivalent to DIRECT.
+          $ref: '#/components/schemas/PredictionContext'
+
+    IncomingLegPrediction:
+      type: object
+      required:
+        - source
+        - context
+        - incomingTripId
+        - nextTripId
+        - routeId
+        - routeShortName
+        - headsign
+        - mode
+        - expectedTerminalArrival
+        - nextScheduledDeparture
+        - propagatedDelaySeconds
+        - referenceTime
+      properties:
+        source:
+          $ref: '#/components/schemas/PredictionSource'
+        context:
+          $ref: '#/components/schemas/PredictionContext'
+        incomingTripId:
+          type: string
+        nextTripId:
+          type: string
+        routeId:
+          type: string
+        routeShortName:
+          type: string
+        headsign:
+          type: string
+        mode:
+          $ref: '#/components/schemas/Mode'
+        expectedTerminalArrival:
+          type: string
+          format: date-time
+          description: Exact RFC 3339 predicted arrival of the incoming leg.
+        nextScheduledDeparture:
+          type: string
+          format: date-time
+          description: Exact RFC 3339 scheduled departure of this leg.
+        propagatedDelaySeconds:
+          type: integer
+          format: int64
+        referenceTime:
+          type: string
+          format: date-time
+          description: Exact RFC 3339 reference timestamp of the incoming GPS prediction.
+
     StopTime:
       description: departure or arrival event at a stop
       type: object
@@ -3632,6 +3960,150 @@ components:
         source:
           description: Filename and line number where this trip is from
           type: string
+        selectedPrediction:
+          description: |
+            Exact selected event prediction. Present on v6 responses and
+            omitted from legacy API versions.
+          $ref: '#/components/schemas/SelectedPrediction'
+
+    PredictionSelectionReason:
+      type: string
+      enum:
+        - PROVIDER_ONLY
+        - GPS_ONLY
+        - PROVIDER_HIGHER_CONFIDENCE
+        - GPS_HIGHER_CONFIDENCE
+        - PROVIDER_PROGRESS_INCONSISTENT
+        - PROVIDER_RECOVERY_PENDING
+        - PROVIDER_RECOVERED
+        - SOURCE_HYSTERESIS
+        - NO_USABLE_CANDIDATE
+        - POLICY_UNAVAILABLE
+
+    PredictionRejectionReason:
+      type: string
+      enum:
+        - STALE
+        - LOW_CONFIDENCE
+        - PHYSICALLY_UNREACHABLE
+        - TIMESTAMP_NOT_COMPARABLE
+        - PROGRESS_NOT_COMPARABLE
+        - PROGRESS_INCONSISTENT
+
+    GpsEstimationRejectionReason:
+      description: >-
+        Debug-only reason the vehicle-position ETA estimator could not produce
+        a GPS candidate. Distinct from PredictionRejectionReason, which applies
+        after a candidate reaches source selection.
+      type: string
+      enum:
+        - MISSING_TRIP_ID
+        - UNRESOLVED_TRIP
+        - UNSCHEDULED_TRIP
+        - UNSUPPORTED_TRIP_RELATIONSHIP
+        - INSUFFICIENT_HISTORY
+        - STALE_HISTORY
+        - MISSING_SHAPE
+        - OFF_SHAPE
+        - AMBIGUOUS_PROGRESS
+        - NON_MONOTONIC_PROGRESS
+        - INVALID_OBSERVATION_TIME
+        - IMPOSSIBLE_SPEED
+        - IMPOSSIBLE_TRAVEL_TIME
+        - TERMINAL
+
+    PredictionCandidate:
+      type: object
+      required:
+        - source
+        - time
+        - delaySeconds
+      properties:
+        source:
+          $ref: '#/components/schemas/PredictionSource'
+        time:
+          description: Predicted Unix timestamp in seconds.
+          type: integer
+          format: int64
+        delaySeconds:
+          type: integer
+          format: int64
+        confidence:
+          type: number
+          format: double
+        referenceTime:
+          description: Candidate reference Unix timestamp in seconds.
+          type: integer
+          format: int64
+
+    PredictionDebug:
+      type: object
+      required:
+        - stopTimeIndex
+        - tripId
+        - stopSequence
+        - selectedSource
+        - selectionReason
+        - effective
+        - sourceTransition
+        - providerRecovery
+        - flap
+        - providerConsistentCycles
+      properties:
+        stopTimeIndex:
+          type: integer
+          minimum: 0
+        tripId:
+          type: string
+        stopSequence:
+          type: integer
+          minimum: 0
+        selectedSource:
+          $ref: '#/components/schemas/PredictionSource'
+        selectionReason:
+          $ref: '#/components/schemas/PredictionSelectionReason'
+        provider:
+          $ref: '#/components/schemas/PredictionCandidate'
+        gps:
+          $ref: '#/components/schemas/PredictionCandidate'
+        effective:
+          $ref: '#/components/schemas/PredictionCandidate'
+        selectedConfidence:
+          type: number
+          format: double
+        providerRejection:
+          $ref: '#/components/schemas/PredictionRejectionReason'
+        gpsRejection:
+          $ref: '#/components/schemas/PredictionRejectionReason'
+        gpsEstimationRejection:
+          $ref: '#/components/schemas/GpsEstimationRejectionReason'
+        context:
+          description: >-
+            Present for predictions propagated from an incoming block leg. An
+            absent value is equivalent to DIRECT.
+          $ref: '#/components/schemas/PredictionContext'
+        latestVehicleObservationTime:
+          description: Latest vehicle observation Unix timestamp in seconds.
+          type: integer
+          format: int64
+        candidateTimestampSkewSeconds:
+          type: integer
+          format: int64
+        projectionErrorMeters:
+          type: number
+          format: double
+        progressDifferenceMeters:
+          type: number
+          format: double
+        sourceTransition:
+          type: boolean
+        providerRecovery:
+          type: boolean
+        flap:
+          type: boolean
+        providerConsistentCycles:
+          type: integer
+          minimum: 0
 
     TripInfo:
       description: trip id and name
@@ -4192,6 +4664,161 @@ components:
           type: string
           description: Rental URI for web (deep link to the specific vehicle)
 
+    TransitVehicleRouteInfo:
+      type: object
+      required:
+        - id
+        - shortName
+        - longName
+      properties:
+        id:
+          type: string
+        shortName:
+          type: string
+        longName:
+          type: string
+        color:
+          type: string
+        textColor:
+          type: string
+
+    VehicleShapeSource:
+      type: string
+      enum:
+        - NONE
+        - TIMETABLE
+        - ROUTED
+
+    TransitVehicleDescriptor:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        licensePlate:
+          type: string
+        wheelchairAccessible:
+          type: string
+
+    TransitVehicleTripDescriptor:
+      type: object
+      properties:
+        tripId:
+          type: string
+        scheduledTripId:
+          type: string
+          description: Resolved MOTIS trip id for the static/realtime run when the vehicle can be matched to the timetable.
+        startDate:
+          type: string
+        startTime:
+          type: string
+        routeId:
+          type: string
+        headsign:
+          type: string
+          description: Passenger-facing trip headsign resolved from the static timetable when available.
+        directionId:
+          type: integer
+          format: int64
+        scheduleRelationship:
+          type: string
+
+    ReportedVehiclePosition:
+      type: object
+      required:
+        - lat
+        - lon
+      properties:
+        lat:
+          description: latitude
+          type: number
+        lon:
+          description: longitude
+          type: number
+        bearing:
+          description: Bearing in degrees.
+          type: number
+        speedMps:
+          description: Speed in meters per second.
+          type: number
+
+    VehicleMatchState:
+      type: string
+      enum:
+        - MATCHED_TRIP
+        - MATCHED_ROUTE_ONLY
+        - UNMATCHED
+
+    VehiclePosition:
+      type: object
+      required:
+        - feedId
+        - entityId
+        - vehicle
+        - trip
+        - matchState
+        - reportedPosition
+        - ingestedTime
+      properties:
+        feedId:
+          type: string
+          description: Realtime feed identity for this vehicle position.
+        entityId:
+          type: string
+          description: GTFS Realtime FeedEntity id.
+        vehicle:
+          $ref: '#/components/schemas/TransitVehicleDescriptor'
+        trip:
+          $ref: '#/components/schemas/TransitVehicleTripDescriptor'
+        matchState:
+          $ref: '#/components/schemas/VehicleMatchState'
+          description: Timetable matching tier reached for this vehicle.
+        route:
+          $ref: '#/components/schemas/TransitVehicleRouteInfo'
+          description: Passenger-facing route metadata for marker labels and colors when resolvable.
+        reportedPosition:
+          $ref: '#/components/schemas/ReportedVehiclePosition'
+        mode:
+          $ref: '#/components/schemas/Mode'
+          description: Transit mode for this vehicle when resolvable.
+        shape:
+          $ref: '#/components/schemas/EncodedPolyline'
+          description: Encoded trip or route shape for map animation when resolvable.
+        shapeId:
+          type: string
+          description: Stable identifier for caching the encoded shape across position polls.
+        shapeSource:
+          $ref: '#/components/schemas/VehicleShapeSource'
+          description: Source of the returned shape.
+        currentStopSequence:
+          type: integer
+          format: int64
+        stopId:
+          type: string
+        currentStatus:
+          type: string
+        occupancyStatus:
+          type: string
+        reportedTime:
+          type: integer
+          format: int64
+          description: VehiclePosition timestamp from the realtime feed as Unix seconds.
+        ingestedTime:
+          type: integer
+          format: int64
+          description: Server ingest timestamp as Unix seconds.
+
+    VehiclePositionsResponse:
+      type: object
+      required:
+        - vehicles
+      properties:
+        vehicles:
+          type: array
+          items:
+            $ref: '#/components/schemas/VehiclePosition'
+
     RentalZone:
       type: object
       required:
@@ -4347,6 +4974,13 @@ components:
           type: string
         tripId:
           type: string
+        primaryVehicle:
+          description: |
+            Deterministically selected live vehicle for this transit leg when
+            a current VehiclePosition can be matched to its trip.
+          anyOf:
+            - $ref: '#/components/schemas/VehiclePosition'
+            - type: 'null'
         routeShortName:
           type: string
         routeLongName:
@@ -4548,6 +5182,18 @@ components:
               items:
                 $ref: '#/components/schemas/FareProduct'
 
+    IntermediateStopEvent:
+      type: object
+      required:
+        - place
+      properties:
+        place:
+          $ref: '#/components/schemas/Place'
+        arrivalPrediction:
+          $ref: '#/components/schemas/SelectedPrediction'
+        departurePrediction:
+          $ref: '#/components/schemas/SelectedPrediction'
+
     Itinerary:
       type: object
       required:
@@ -4581,6 +5227,20 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/FareTransfer'
+        startPrediction:
+          $ref: '#/components/schemas/SelectedPrediction'
+        endPrediction:
+          $ref: '#/components/schemas/SelectedPrediction'
+        intermediateStopEvents:
+          type: array
+          items:
+            $ref: '#/components/schemas/IntermediateStopEvent'
+        incomingLegPrediction:
+          description: >-
+            GPS timing propagated from the immediately preceding trip on the
+            same block. Present only on v6 trip responses while that context is
+            selected and fresh.
+          $ref: '#/components/schemas/IncomingLegPrediction'
 
     Transfer:
       description: transfer from one location to another

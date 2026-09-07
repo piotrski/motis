@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
+#include <limits>
 #include <memory>
+#include <set>
 
 #include "boost/json.hpp"
 #include "date/date.h"
@@ -128,6 +131,7 @@ api::PredictionSourceEnum to_api(vehicle_prediction_source const source) {
     case vehicle_prediction_source::kSchedule:
       return api::PredictionSourceEnum::SCHEDULE;
   }
+  std::unreachable();
 }
 
 api::PredictionSelectionReasonEnum to_api(
@@ -154,6 +158,7 @@ api::PredictionSelectionReasonEnum to_api(
     case vehicle_prediction_selection_reason::kPolicyUnavailable:
       return api::PredictionSelectionReasonEnum::POLICY_UNAVAILABLE;
   }
+  std::unreachable();
 }
 
 api::PredictionRejectionReasonEnum to_api(
@@ -172,6 +177,7 @@ api::PredictionRejectionReasonEnum to_api(
     case timing_candidate_rejection_reason::kProgressInconsistent:
       return api::PredictionRejectionReasonEnum::PROGRESS_INCONSISTENT;
   }
+  std::unreachable();
 }
 
 api::GpsEstimationRejectionReasonEnum to_api(
@@ -207,6 +213,7 @@ api::GpsEstimationRejectionReasonEnum to_api(
     case vehicle_prediction_rejection_reason::kTerminal:
       return api_reason::TERMINAL;
   }
+  std::unreachable();
 }
 
 api::PredictionCandidate to_api(
@@ -457,7 +464,10 @@ std::vector<n::rt::run> get_events(
     std::size_t const max_count,
     n::routing::clasz_mask_t const allowed_clasz,
     bool const with_scheduled_skipped_stops,
-    std::optional<n::duration_t> const max_time_diff) {
+    std::optional<std::int64_t> const max_time_diff_seconds,
+    std::int64_t const window_origin_seconds,
+    std::int64_t const window_margin_seconds,
+    std::function<bool(n::rt::run const&)> const& include_event) {
   auto iterators = std::vector<std::unique_ptr<ev_iterator>>{};
 
   if (rtt != nullptr) {
@@ -537,15 +547,26 @@ std::vector<n::rt::run> get_events(
         });
     assert(!(*it)->finished());
     auto const current_time = (*it)->time();
-    if ((!max_time_diff.has_value() ||
-         std::chrono::abs(current_time - time) > *max_time_diff) &&
+    auto const current_seconds = to_seconds(current_time);
+    auto const past_window =
+        max_time_diff_seconds.has_value() &&
+        (fwd ? current_seconds > window_origin_seconds +
+                                     *max_time_diff_seconds +
+                                     window_margin_seconds
+             : current_seconds < window_origin_seconds -
+                                     *max_time_diff_seconds -
+                                     window_margin_seconds);
+    if ((!max_time_diff_seconds.has_value() || past_window) &&
         (evs.size() >= min_count && current_time != last_time)) {
       break;
     }
-    evs.emplace_back((*it)->get());
-    utl::verify<net::too_many_exception>(
-        evs.size() <= max_count,
-        "requesting for more than {} datapoints is not allowed", max_count);
+    auto const event = (*it)->get();
+    if (include_event(event)) {
+      evs.emplace_back(event);
+      utl::verify<net::too_many_exception>(
+          evs.size() <= max_count,
+          "requesting for more than {} datapoints is not allowed", max_count);
+    }
     last_time = current_time;
     (*it)->increment();
   }
@@ -671,17 +692,30 @@ api::stoptimes_response stop_times::operator()(
       std::chrono::duration_cast<std::chrono::seconds>(
           query.time_.value_or(openapi::now())->time_since_epoch())
           .count();
-  auto const collection_cursor =
-      decoded_cursor.has_value()
-          ? fmt::format(
-                "{}|{}",
-                decoded_cursor->direction_ == n::direction::kForward
-                    ? "LATER"
-                    : "EARLIER",
-                decoded_cursor->selected_seconds_ +
-                    (decoded_cursor->direction_ == n::direction::kForward ? -60
-                                                                          : 60))
-          : fmt::format("{}|{}", default_direction, default_seconds);
+  auto const cursor_direction = decoded_cursor.has_value()
+                                    ? decoded_cursor->direction_
+                                : std::string_view{default_direction} == "LATER"
+                                    ? n::direction::kForward
+                                    : n::direction::kBackward;
+  auto const boundary_seconds = decoded_cursor.has_value()
+                                    ? decoded_cursor->selected_seconds_
+                                    : default_seconds;
+  if (decoded_cursor.has_value()) {
+    auto const cursor_in_range =
+        cursor_direction == n::direction::kForward
+            ? boundary_seconds >= std::numeric_limits<std::int64_t>::min() + 60
+            : boundary_seconds <= std::numeric_limits<std::int64_t>::max() - 60;
+    utl::verify<net::bad_request_exception>(cursor_in_range,
+                                            "invalid v6 page cursor timestamp");
+  }
+  auto const collection_seconds =
+      api_version >= 6
+          ? boundary_seconds +
+                (cursor_direction == n::direction::kForward ? -60 : 60)
+          : boundary_seconds;
+  auto const collection_cursor = fmt::format(
+      "{}|{}", cursor_direction == n::direction::kForward ? "LATER" : "EARLIER",
+      collection_seconds);
   auto const [dir, time] = parse_cursor(collection_cursor);
 
   auto locations = std::vector<n::location_idx_t>{};
@@ -741,13 +775,86 @@ api::stoptimes_response stop_times::operator()(
                         matches_, ae_, tz_, query.language_, tt_location{l})
             .stopId_;
       });
-  auto const window = query.window_.transform([](auto const w) {
-    return std::chrono::duration_cast<n::duration_t>(std::chrono::seconds{w});
-  });
+  auto const window = query.window_.transform(
+      [](auto const w) { return static_cast<std::int64_t>(w); });
+  auto const window_origin_seconds =
+      api_version >= 6 ? boundary_seconds : to_seconds(time);
+  if (window.has_value()) {
+    auto const margin = api_version >= 6 ? std::int64_t{60} : 0;
+    auto const span_safe =
+        *window >= 0 &&
+        *window <= std::numeric_limits<std::int64_t>::max() - margin;
+    auto const bounds_safe =
+        span_safe &&
+        (cursor_direction == n::direction::kForward
+             ? window_origin_seconds <=
+                   std::numeric_limits<std::int64_t>::max() - *window - margin
+             : window_origin_seconds >=
+                   std::numeric_limits<std::int64_t>::min() + *window + margin);
+    utl::verify<net::bad_request_exception>(bounds_safe,
+                                            "invalid stoptimes window");
+  }
+  auto const exact_key = [&](n::rt::run const& run) {
+    auto const fr = n::rt::frun{tt_, rtt, run};
+    auto const stop = fr[0];
+    auto const trip_id = tags_.id(tt_, stop, ev_type);
+    auto const scheduled = to_seconds(stop.scheduled_time(ev_type));
+    auto const sequence = static_stop_sequence(
+        tt_, fr.t_.t_idx_, stop.get_trip_idx(ev_type), stop.stop_idx_);
+    auto const* diagnostic =
+        rt->vehicle_prediction_diagnostics_ == nullptr || !sequence.has_value()
+            ? nullptr
+            : rt->vehicle_prediction_diagnostics_->find_event(
+                  fr.t_, trip_id, *sequence, scheduled,
+                  ev_type == n::event_type::kArr
+                      ? vehicle_prediction_event_type::kArrival
+                      : vehicle_prediction_event_type::kDeparture);
+    auto const selected = resolve_effective_prediction(
+        run.is_rt(), scheduled, to_seconds(stop.time(ev_type)), diagnostic);
+    return std::tuple{selected.predicted_timestamp_seconds_, trip_id, scheduled,
+                      static_cast<unsigned>(fr.stop_range_.from_),
+                      static_cast<unsigned>(ev_type)};
+  };
+  auto const cursor_key = [&](n::rt::run const& run) {
+    auto const key = exact_key(run);
+    return std::pair{
+        std::get<0>(key),
+        fmt::format("{}|{}|{}|{}", std::get<1>(key), std::get<2>(key),
+                    std::get<3>(key), std::get<4>(key))};
+  };
+  auto seen_exact_keys =
+      std::set<std::tuple<std::int64_t, std::string, std::int64_t, unsigned,
+                          unsigned>>{};
+  auto const include_event = [&](n::rt::run const& run) {
+    if (api_version < 6) {
+      return true;
+    }
+    auto const key = cursor_key(run);
+    if (decoded_cursor.has_value()) {
+      auto const boundary = std::pair{decoded_cursor->selected_seconds_,
+                                      decoded_cursor->identity_};
+      if (cursor_direction == n::direction::kForward ? key <= boundary
+                                                     : key >= boundary) {
+        return false;
+      }
+    } else if (cursor_direction == n::direction::kForward
+                   ? key.first < boundary_seconds
+                   : key.first > boundary_seconds) {
+      return false;
+    }
+    if (window.has_value() && (cursor_direction == n::direction::kForward
+                                   ? key.first > boundary_seconds + *window
+                                   : key.first < boundary_seconds - *window)) {
+      return false;
+    }
+    return seen_exact_keys.emplace(exact_key(run)).second;
+  };
   auto events = get_events(locations, tt_, rtt, time, ev_type, dir,
                            static_cast<std::size_t>(query.n_.value_or(0)),
                            static_cast<std::size_t>(max_results), allowed_clasz,
-                           query.withScheduledSkippedStops_, window);
+                           query.withScheduledSkippedStops_, window,
+                           window_origin_seconds, api_version >= 6 ? 60 : 0,
+                           include_event);
 
   if (events.empty() && query.exactRadius_ && query_stop.has_value() &&
       query.stopId_.has_value()) {
@@ -761,11 +868,12 @@ api::stoptimes_response stop_times::operator()(
       }
       utl::erase_duplicates(fallback_locations);
 
-      auto fallback_events =
-          get_events(fallback_locations, tt_, rtt, time, ev_type, dir,
-                     static_cast<std::size_t>(max_results),
-                     static_cast<std::size_t>(max_results), allowed_clasz,
-                     query.withScheduledSkippedStops_, window);
+      auto fallback_events = get_events(
+          fallback_locations, tt_, rtt, time, ev_type, dir,
+          static_cast<std::size_t>(max_results),
+          static_cast<std::size_t>(max_results), allowed_clasz,
+          query.withScheduledSkippedStops_, window, window_origin_seconds,
+          api_version >= 6 ? 60 : 0, include_event);
 
       auto filtered_events = std::vector<n::rt::run>{};
       for (auto const r : fallback_events) {
@@ -787,39 +895,13 @@ api::stoptimes_response stop_times::operator()(
                                                  ? fr_a[0].get_trip_idx(ev_type)
                                                  : n::trip_idx_t::invalid()};
   };
-  auto const exact_key = [&](n::rt::run const& run) {
-    auto const fr = n::rt::frun{tt_, rtt, run};
-    auto const stop = fr[0];
-    auto const trip_id = tags_.id(tt_, stop, ev_type);
-    auto const scheduled = to_seconds(stop.scheduled_time(ev_type));
-    auto const* diagnostic =
-        rt->vehicle_prediction_diagnostics_ == nullptr
-            ? nullptr
-            : rt->vehicle_prediction_diagnostics_->find_event(
-                  fr.t_, trip_id, scheduled,
-                  ev_type == n::event_type::kArr
-                      ? vehicle_prediction_event_type::kArrival
-                      : vehicle_prediction_event_type::kDeparture);
-    auto const selected = resolve_effective_prediction(
-        run.is_rt(), scheduled, to_seconds(stop.time(ev_type)), diagnostic);
-    return std::tuple{selected.predicted_timestamp_seconds_, trip_id, scheduled,
-                      static_cast<unsigned>(fr.stop_range_.from_),
-                      static_cast<unsigned>(ev_type)};
-  };
-  auto const cursor_key = [&](n::rt::run const& run) {
-    auto const key = exact_key(run);
-    return std::pair{
-        std::get<0>(key),
-        fmt::format("{}|{}|{}|{}", std::get<1>(key), std::get<2>(key),
-                    std::get<3>(key), std::get<4>(key))};
-  };
   if (api_version >= 6) {
     utl::sort(events, [&](auto const& a, auto const& b) {
-      return exact_key(a) < exact_key(b);
+      return cursor_key(a) < cursor_key(b);
     });
     events.erase(std::unique(begin(events), end(events),
                              [&](auto const& a, auto const& b) {
-                               return exact_key(a) == exact_key(b);
+                               return cursor_key(a) == cursor_key(b);
                              }),
                  end(events));
     if (decoded_cursor.has_value()) {
@@ -881,11 +963,14 @@ api::stoptimes_response stop_times::operator()(
             auto const trip_id = tags_.id(tt_, s, ev_type);
             auto const scheduled_timestamp =
                 to_seconds(s.scheduled_time(ev_type));
+            auto const sequence = static_stop_sequence(
+                tt_, fr.t_.t_idx_, s.get_trip_idx(ev_type), s.stop_idx_);
             auto const* prediction_diagnostic =
-                rt->vehicle_prediction_diagnostics_ == nullptr
+                rt->vehicle_prediction_diagnostics_ == nullptr ||
+                        !sequence.has_value()
                     ? nullptr
                     : rt->vehicle_prediction_diagnostics_->find_event(
-                          fr.t_, trip_id, scheduled_timestamp,
+                          fr.t_, trip_id, *sequence, scheduled_timestamp,
                           ev_type == n::event_type::kArr
                               ? vehicle_prediction_event_type::kArrival
                               : vehicle_prediction_event_type::kDeparture);
@@ -993,11 +1078,16 @@ api::stoptimes_response stop_times::operator()(
       auto const s = fr[0];
       auto const trip_id = tags_.id(tt_, s, ev_type);
       auto const scheduled = to_seconds(s.scheduled_time(ev_type));
-      if (auto const* entry = rt->vehicle_prediction_diagnostics_->find_event(
-              fr.t_, trip_id, scheduled,
-              ev_type == n::event_type::kArr
-                  ? vehicle_prediction_event_type::kArrival
-                  : vehicle_prediction_event_type::kDeparture);
+      auto const sequence = static_stop_sequence(
+          tt_, fr.t_.t_idx_, s.get_trip_idx(ev_type), s.stop_idx_);
+      if (auto const* entry =
+              sequence.has_value()
+                  ? rt->vehicle_prediction_diagnostics_->find_event(
+                        fr.t_, trip_id, *sequence, scheduled,
+                        ev_type == n::event_type::kArr
+                            ? vehicle_prediction_event_type::kArrival
+                            : vehicle_prediction_event_type::kDeparture)
+                  : nullptr;
           entry != nullptr) {
         debug.emplace_back(to_api(*entry, index));
       }

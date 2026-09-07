@@ -62,10 +62,9 @@ transit_realtime::TripDescriptor to_trip_descriptor(
   return td;
 }
 
-std::optional<n::trip_idx_t> find_static_trip(
-    n::timetable const& tt,
-    n::source_idx_t const src,
-    std::string_view const trip_id) {
+std::optional<n::trip_idx_t> find_static_trip(n::timetable const& tt,
+                                              n::source_idx_t const src,
+                                              std::string_view const trip_id) {
   auto const it = std::lower_bound(
       begin(tt.trip_id_to_idx_), end(tt.trip_id_to_idx_), trip_id,
       [&](n::pair<n::trip_id_idx_t, n::trip_idx_t> const& entry,
@@ -87,11 +86,10 @@ std::optional<n::rt::frun> static_trip_run(n::timetable const& tt,
     return std::nullopt;
   }
   auto const [transport, stop_range] = tt.trip_transport_ranges_[trip].front();
-  return n::rt::frun{
-      tt, nullptr,
-      n::rt::run{.t_ = n::transport{transport, n::day_idx_t{0U}},
-                 .stop_range_ = stop_range,
-                 .rt_ = n::rt_transport_idx_t::invalid()}};
+  return n::rt::frun{tt, nullptr,
+                     n::rt::run{.t_ = n::transport{transport, n::day_idx_t{0U}},
+                                .stop_range_ = stop_range,
+                                .rt_ = n::rt_transport_idx_t::invalid()}};
 }
 
 api::TransitVehicleRouteInfo to_route_info(n::rt::run_stop const& s,
@@ -99,8 +97,7 @@ api::TransitVehicleRouteInfo to_route_info(n::rt::run_stop const& s,
   auto const color = s.get_route_color(n::event_type::kDep);
   return api::TransitVehicleRouteInfo{
       .id_ = std::string{s.get_route_id(n::event_type::kDep)},
-      .shortName_ =
-          std::string{s.route_short_name(n::event_type::kDep, lang)},
+      .shortName_ = std::string{s.route_short_name(n::event_type::kDep, lang)},
       .longName_ = std::string{s.route_long_name(n::event_type::kDep, lang)},
       .color_ = to_str(color.color_),
       .textColor_ = to_str(color.text_color_)};
@@ -145,8 +142,7 @@ bool route_matches(tag_lookup const& tags,
   }
   auto const& routes = tt.route_ids_[src];
   auto const route_id = find_route_id(routes, *vehicle.trip_.route_id_);
-  return route_id.has_value() &&
-         routes.ids_.get(*route_id) == target_route_id;
+  return route_id.has_value() && routes.ids_.get(*route_id) == target_route_id;
 }
 
 api::VehicleShapeSourceEnum shape_source(n::rt::frun const& fr,
@@ -168,8 +164,7 @@ api::VehicleShapeSourceEnum shape_source(n::rt::frun const& fr,
 }
 
 std::optional<api::EncodedPolyline> encode_shape(
-    n::rt::frun const& fr,
-    n::shapes_storage const* shapes) {
+    n::rt::frun const& fr, n::shapes_storage const* shapes) {
   if (fr.size() < 2U) {
     return std::nullopt;
   }
@@ -203,9 +198,9 @@ void apply_trip_run_details(vehicle_details& details,
   details.mode_ = to_mode(first.get_clasz(n::event_type::kDep), 5);
   details.shape_ = encode_shape(fr, shapes);
   if (details.shape_.has_value()) {
-    auto const hash = cista::hash_combine(
-        cista::hash(details.shape_->points_), details.shape_->precision_,
-        details.shape_->length_);
+    auto const hash = cista::hash_combine(cista::hash(details.shape_->points_),
+                                          details.shape_->precision_,
+                                          details.shape_->length_);
     details.shape_id_ = fmt::format("vehicle-shape-{:016x}", hash);
     details.shape_source_ = shape_source(fr, shapes);
   }
@@ -264,9 +259,8 @@ std::optional<n::rt::frun> resolve_run(
   }
 
   auto const td = to_trip_descriptor(vehicle);
-  if (!td.has_trip_id() &&
-      !(td.has_route_id() && td.has_direction_id() && td.has_start_date() &&
-        td.has_start_time())) {
+  if (!td.has_trip_id() && !(td.has_route_id() && td.has_direction_id() &&
+                             td.has_start_date() && td.has_start_time())) {
     return std::nullopt;
   }
 
@@ -327,10 +321,10 @@ std::optional<api::TransitVehicleRouteInfo> resolve_route_info_by_id(
   auto const color = routes.route_id_colors_[*route_id];
   return api::TransitVehicleRouteInfo{
       .id_ = *vehicle.trip_.route_id_,
-      .shortName_ = std::string{
-          tt.translate(lang, routes.route_id_short_names_[*route_id])},
-      .longName_ = std::string{
-          tt.translate(lang, routes.route_id_long_names_[*route_id])},
+      .shortName_ = std::string{tt.translate(
+          lang, routes.route_id_short_names_[*route_id])},
+      .longName_ = std::string{tt.translate(
+          lang, routes.route_id_long_names_[*route_id])},
       .color_ = to_str(color.color_),
       .textColor_ = to_str(color.text_color_)};
 }
@@ -355,13 +349,12 @@ std::optional<api::ModeEnum> resolve_mode_by_route_id(
                  5);
 }
 
-vehicle_details resolve_details(
-    tag_lookup const* tags,
-    n::timetable const* tt,
-    n::rt_timetable const* rtt,
-    n::shapes_storage const* shapes,
-    vehicle_positions::vehicle_position const& v,
-    n::lang_t const& lang) {
+vehicle_details resolve_details(tag_lookup const* tags,
+                                n::timetable const* tt,
+                                n::rt_timetable const* rtt,
+                                n::shapes_storage const* shapes,
+                                vehicle_positions::vehicle_position const& v,
+                                n::lang_t const& lang) {
   auto details = vehicle_details{};
   if (tags == nullptr || tt == nullptr) {
     return details;
@@ -375,15 +368,13 @@ vehicle_details resolve_details(
     if (auto fr = resolve_static_trip_run_by_id(*tags, *tt, v);
         fr.has_value()) {
       apply_trip_run_details(details, *tags, *tt, *fr, shapes, lang);
-      details.match_state_ =
-          api::VehicleMatchStateEnum::MATCHED_ROUTE_ONLY;
+      details.match_state_ = api::VehicleMatchStateEnum::MATCHED_ROUTE_ONLY;
     }
   }
   if (!details.route_.has_value()) {
     details.route_ = resolve_route_info_by_id(*tags, *tt, v, lang);
     if (details.route_.has_value()) {
-      details.match_state_ =
-          api::VehicleMatchStateEnum::MATCHED_ROUTE_ONLY;
+      details.match_state_ = api::VehicleMatchStateEnum::MATCHED_ROUTE_ONLY;
     }
   }
   if (!details.mode_.has_value()) {
@@ -392,10 +383,9 @@ vehicle_details resolve_details(
   return details;
 }
 
-api::VehiclePosition to_api(
-    vehicle_positions::vehicle_position const& vehicle,
-    vehicle_details details,
-    bool const include_shapes) {
+api::VehiclePosition to_api(vehicle_positions::vehicle_position const& vehicle,
+                            vehicle_details details,
+                            bool const include_shapes) {
   return api::VehiclePosition{
       .feedId_ = vehicle.feed_id_,
       .entityId_ = vehicle.entity_id_,
@@ -404,8 +394,7 @@ api::VehiclePosition to_api(
               .id_ = vehicle.vehicle_.id_,
               .label_ = vehicle.vehicle_.label_,
               .licensePlate_ = vehicle.vehicle_.license_plate_,
-              .wheelchairAccessible_ =
-                  vehicle.vehicle_.wheelchair_accessible_},
+              .wheelchairAccessible_ = vehicle.vehicle_.wheelchair_accessible_},
       .trip_ =
           api::TransitVehicleTripDescriptor{
               .tripId_ = vehicle.trip_.trip_id_,
@@ -442,16 +431,36 @@ std::int64_t freshness_cutoff(std::int64_t const now,
   return now < kMin + max_age ? kMin : now - max_age;
 }
 
-bool is_fresh(vehicle_positions::vehicle_position const& vehicle,
-              std::int64_t const cutoff) {
-  return vehicle.reported_time_.value_or(vehicle.ingested_time_) >= cutoff;
+namespace {
+
+std::int64_t freshness_ceiling(std::int64_t const now) {
+  auto constexpr kMaxFutureSkew = std::int64_t{60};
+  auto constexpr kMax = std::numeric_limits<std::int64_t>::max();
+  return now > kMax - kMaxFutureSkew ? kMax : now + kMaxFutureSkew;
 }
 
-bool matches_service_day(
-    tag_lookup const& tags,
-    n::timetable const& tt,
-    n::rt::frun const& target,
-    vehicle_positions::vehicle_position const& vehicle) {
+std::int64_t freshness_time(vehicle_positions::vehicle_position const& vehicle,
+                            std::int64_t const now) {
+  auto const ceiling = freshness_ceiling(now);
+  return vehicle.reported_time_.has_value() &&
+                 *vehicle.reported_time_ <= ceiling
+             ? *vehicle.reported_time_
+             : vehicle.ingested_time_;
+}
+
+}  // namespace
+
+bool is_fresh(vehicle_positions::vehicle_position const& vehicle,
+              std::int64_t const cutoff,
+              std::int64_t const now) {
+  auto const timestamp = freshness_time(vehicle, now);
+  return timestamp >= cutoff && timestamp <= freshness_ceiling(now);
+}
+
+bool matches_service_day(tag_lookup const& tags,
+                         n::timetable const& tt,
+                         n::rt::frun const& target,
+                         vehicle_positions::vehicle_position const& vehicle) {
   if (!vehicle.trip_.start_date_.has_value()) {
     return false;
   }
@@ -469,6 +478,7 @@ std::optional<api::VehiclePosition> primary_vehicle(
     vehicle_positions::vehicle_position_store const& store,
     n::rt::frun const& target,
     std::int64_t const freshness_cutoff,
+    std::int64_t const now,
     n::lang_t const& lang) {
   auto best = std::optional<ranked_vehicle>{};
   auto const first = target[0];
@@ -476,7 +486,7 @@ std::optional<api::VehiclePosition> primary_vehicle(
   auto const target_direction = first.get_direction_id(n::event_type::kDep);
 
   for (auto const& vehicle : store.all()) {
-    if (!is_fresh(vehicle, freshness_cutoff)) {
+    if (!is_fresh(vehicle, freshness_cutoff, now)) {
       continue;
     }
     auto exact_trip_match = false;
@@ -507,11 +517,9 @@ std::optional<api::VehiclePosition> primary_vehicle(
         .vehicle_ = &vehicle,
         .details_ = std::move(details),
         .exact_trip_match_ = exact_trip_match,
-        .vehicle_descriptor_id_available_ =
-            vehicle.vehicle_.id_.has_value(),
+        .vehicle_descriptor_id_available_ = vehicle.vehicle_.id_.has_value(),
         .route_direction_stop_consistency_ = consistency,
-        .freshness_ =
-            vehicle.reported_time_.value_or(vehicle.ingested_time_)};
+        .freshness_ = freshness_time(vehicle, now)};
     if (!best.has_value() || better(candidate, *best)) {
       best = std::move(candidate);
     }

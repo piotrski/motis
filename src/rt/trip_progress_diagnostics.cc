@@ -156,7 +156,7 @@ std::vector<trip_progress_diagnostic> evaluate_trip_progress_diagnostics(
       reject(trip_progress_diagnostic_status::kUnsupportedScheduleRelationship);
       continue;
     }
-    if (!vehicle_matching::is_fresh(vehicle, cutoff)) {
+    if (!vehicle_matching::is_fresh(vehicle, cutoff, now)) {
       reject(trip_progress_diagnostic_status::kStale);
       continue;
     }
