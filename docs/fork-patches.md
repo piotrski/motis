@@ -31,6 +31,16 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
   - `motis-test` `stop_times` coverage
   - exact child-platform `stoptimes` query returns departures when the station board contains events for that child stop
 
+### Live vehicles and GPS-derived predictions
+
+- Status: still required
+- Source: `codex/live-vehicles-gps-v6` (PR #52)
+- Purpose: expose identity-safe live vehicle observations and combine bounded GPS, provider, and schedule prediction candidates
+- Tests to run:
+  - `motis-test --gtest_filter='motis_vehicle_positions.*:vehicle_prediction*.*:trip_progress_projection.*'`
+  - `motis-test --gtest_filter='motis.stop_times:motis.trip*:motis_rt_update.*'`
+  - full `motis-test`
+
 ## Resolved Upstream
 
 ### Modes on `Place`
