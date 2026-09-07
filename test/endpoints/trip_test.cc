@@ -398,6 +398,24 @@ TEST(motis, trip_vehicle_matches_requested_interlined_segment) {
   ASSERT_EQ(joined.legs_.size(), 1U);
   ASSERT_TRUE(joined.legs_.front().primaryVehicle_.has_value());
   EXPECT_EQ(joined.legs_.front().primaryVehicle_->entityId_, "middle-vehicle");
+
+  auto prefixed_route =
+      vehicle("prefixed-route", "middle", "10:10:00", "prefix-R2", "B", 8.02);
+  prefixed_route.vehicle_.id_ = "vehicle-prefixed-route";
+  prefixed_route.trip_.trip_id_.reset();
+  d.rt_->vehicle_positions_->replace_feed("test", {prefixed_route});
+  d.rt_->vehicle_positions_->replace_feed("test", {prefixed_route});
+
+  auto const route_only = endpoint(
+      "/api/v6/trip?tripId=20190501_10%3A10_test_middle"
+      "&joinInterlinedLegs=false");
+  auto const route_only_middle =
+      std::ranges::find_if(route_only.legs_, [](auto const& leg) {
+        return leg.tripId_ == "20190501_10:10_test_middle";
+      });
+  ASSERT_NE(route_only_middle, end(route_only.legs_));
+  ASSERT_TRUE(route_only_middle->primaryVehicle_.has_value());
+  EXPECT_EQ(route_only_middle->primaryVehicle_->entityId_, "prefixed-route");
 }
 
 TEST(motis, trip_prediction_provenance_uses_each_interlined_leg) {

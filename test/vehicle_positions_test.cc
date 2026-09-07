@@ -15,6 +15,7 @@
 #include "gtfsrt/gtfs-realtime.pb.h"
 
 #include "nigiri/rt/frun.h"
+#include "nigiri/rt/rt_timetable.h"
 #include "net/bad_request_exception.h"
 #include "net/too_many_exception.h"
 #include "openapi/bad_request_exception.h"
@@ -195,6 +196,18 @@ TEST(motis_vehicle_positions, drops_invalid_optional_telemetry) {
   EXPECT_FALSE(vehicles.front().reported_position_.speed_mps_.has_value());
 }
 
+TEST(motis_vehicle_positions, rejects_reported_time_outside_int64) {
+  auto feed = feed_with_vehicle();
+  feed.mutable_entity(0)->mutable_vehicle()->set_timestamp(
+      std::numeric_limits<std::uint64_t>::max());
+
+  auto const vehicles =
+      parse_gtfsrt_vehicle_positions("krakow", feed, 1789992010);
+
+  ASSERT_THAT(vehicles, SizeIs(1));
+  EXPECT_FALSE(vehicles.front().reported_time_);
+}
+
 TEST(motis_vehicle_positions, replaces_only_the_selected_feed) {
   auto store = vehicle_position_store{};
   store.replace_feed("feed-a", {position("feed-a", "old", 50.0, 19.9),
@@ -284,6 +297,53 @@ TEST(motis_vehicle_positions,
   EXPECT_EQ(store.all().front().entity_id_, "new-entity");
 }
 
+TEST(motis_vehicle_positions,
+     full_snapshot_supersedes_rotated_entity_id_for_same_vehicle) {
+  auto store = vehicle_position_store{};
+  auto previous = position("feed", "old-entity", 50.0, 19.9);
+  previous.vehicle_.id_ = "vehicle-1";
+  store.replace_feed("feed", {previous});
+  auto replacement = position("feed", "new-entity", 50.1, 19.9);
+  replacement.vehicle_.id_ = "vehicle-1";
+
+  store.replace_feed("feed", {replacement});
+
+  ASSERT_THAT(store.all(), SizeIs(1));
+  EXPECT_EQ(store.all().front().entity_id_, "new-entity");
+}
+
+TEST(motis_vehicle_positions,
+     incoming_batch_keeps_newest_entity_for_each_vehicle) {
+  auto store = vehicle_position_store{};
+  auto older = position("feed", "old-entity", 50.0, 19.9, 100);
+  older.vehicle_.id_ = "vehicle-1";
+  older.reported_time_ = std::numeric_limits<std::int64_t>::max();
+  auto newer = position("feed", "new-entity", 50.1, 19.9, 200);
+  newer.vehicle_.id_ = "vehicle-1";
+
+  store.replace_feed("feed", {older, newer});
+
+  ASSERT_THAT(store.all(), SizeIs(1));
+  EXPECT_EQ(store.all().front().entity_id_, "new-entity");
+}
+
+TEST(motis_vehicle_positions, bounds_each_feed_to_the_newest_positions) {
+  auto positions = std::vector<vehicle_position>{};
+  positions.reserve(kMaxVehiclePositionsPerFeed + 1U);
+  for (auto i = std::size_t{0U}; i != kMaxVehiclePositionsPerFeed + 1U; ++i) {
+    positions.emplace_back(position("feed", std::to_string(i), 50.0, 19.9,
+                                    static_cast<std::int64_t>(i)));
+  }
+  auto store = vehicle_position_store{};
+
+  store.replace_feed("feed", std::move(positions));
+
+  EXPECT_EQ(store.all().size(), kMaxVehiclePositionsPerFeed);
+  EXPECT_EQ(std::ranges::find(store.all(), "0",
+                              &vehicle_position::entity_id_),
+            end(store.all()));
+}
+
 TEST(motis_vehicle_positions, prunes_stale_differential_entities) {
   auto store = vehicle_position_store{};
   store.update_feed(
@@ -296,6 +356,18 @@ TEST(motis_vehicle_positions, prunes_stale_differential_entities) {
 
   ASSERT_THAT(store.all(), SizeIs(1));
   EXPECT_EQ(store.all().front().entity_id_, "fresh");
+}
+
+TEST(motis_vehicle_positions, default_max_age_bounds_differential_retention) {
+  EXPECT_EQ(motis::vehicle_matching::default_max_age(1U), 60);
+  EXPECT_EQ(motis::vehicle_matching::default_max_age(20U), 60);
+  EXPECT_EQ(motis::vehicle_matching::default_max_age(60U), 180);
+  EXPECT_EQ(motis::vehicle_matching::vehicle_position_retention_seconds(
+                1U, std::nullopt),
+            60);
+  EXPECT_EQ(motis::vehicle_matching::vehicle_position_retention_seconds(1U,
+                                                                        300),
+            300);
 }
 
 TEST(motis_vehicle_positions, snapshots_only_viewport_matches) {
@@ -545,6 +617,11 @@ TEST(motis_vehicle_positions, rt_update_consumes_vehicle_only_gtfsrt_feed) {
 
   fs::create_directory("dump_rt");
   auto feed = feed_with_vehicle(50.061, 19.938, "prefix-route-1");
+  auto* alert_entity = feed.add_entity();
+  alert_entity->set_id("alert-1");
+  auto* alert = alert_entity->mutable_alert();
+  alert->mutable_header_text()->add_translation()->set_text("Service alert");
+  alert->add_informed_entity()->set_route_id("route-1");
   feed.mutable_entity(0)->mutable_vehicle()->mutable_trip()->set_start_time(
       "01:00:00");
   feed.mutable_entity(0)->mutable_vehicle()->clear_timestamp();
@@ -559,9 +636,17 @@ TEST(motis_vehicle_positions, rt_update_consumes_vehicle_only_gtfsrt_feed) {
 
   auto current_time = std::chrono::system_clock::now();
   auto ioc = boost::asio::io_context{};
+  auto applied_non_vehicle_entities = false;
   motis::run_rt_update(ioc, c, d,
-                       {.now_ = [&current_time] { return current_time; }});
+                       {.now_ = [&current_time] { return current_time; },
+                        .after_gtfsrt_apply_ =
+                            [&](std::size_t, bool) {
+                              applied_non_vehicle_entities = true;
+                            }});
   ioc.run_for(std::chrono::milliseconds{100});
+
+  EXPECT_TRUE(applied_non_vehicle_entities);
+  EXPECT_EQ(d.rt_->rtt_->alerts_.header_text_.size(), 1U);
 
   auto const snapshot = d.rt_->vehicle_positions_->snapshot(vehicle_viewport{
       .min_ = geo::latlng{50.0, 19.8}, .max_ = geo::latlng{50.2, 20.1}});
@@ -757,6 +842,16 @@ TEST(motis_vehicle_positions, rt_update_consumes_vehicle_only_gtfsrt_feed) {
       select({unrelated_route, canonical_prefixed_route});
   ASSERT_TRUE(route_only_selected.has_value());
   EXPECT_EQ(route_only_selected->entityId_, "z-canonical-prefixed-route");
+
+  auto accidental_suffix = candidate;
+  accidental_suffix.entity_id_ = "z-accidental-route-suffix";
+  accidental_suffix.trip_.route_id_ = "expressroute-1";
+  auto neutral_route = candidate;
+  neutral_route.entity_id_ = "a-neutral-route";
+  neutral_route.trip_.route_id_ = "wrong-route";
+  auto suffix_selected = select({accidental_suffix, neutral_route});
+  ASSERT_TRUE(suffix_selected.has_value());
+  EXPECT_EQ(suffix_selected->entityId_, "a-neutral-route");
 
   auto older = candidate;
   older.entity_id_ = "older";

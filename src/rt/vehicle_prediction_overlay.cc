@@ -1,6 +1,7 @@
 #include "motis/rt/vehicle_prediction_overlay.h"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <optional>
 #include <tuple>
@@ -19,6 +20,40 @@
 namespace n = nigiri;
 
 namespace motis {
+
+std::vector<n::transport> select_complete_vehicle_prediction_overlays(
+    std::span<vehicle_prediction_overlay_size const> const candidates,
+    std::size_t const max_events) {
+  auto totals = std::map<n::transport, std::optional<std::size_t>>{};
+  for (auto const& candidate : candidates) {
+    auto const it =
+        totals.try_emplace(candidate.transport_, std::size_t{0U}).first;
+    auto& total = it->second;
+    if (!total.has_value()) {
+      continue;
+    }
+    if (candidate.event_count_ > max_events - *total) {
+      total.reset();
+    } else {
+      *total += candidate.event_count_;
+    }
+  }
+
+  auto selected = std::vector<n::transport>{};
+  auto selected_events = std::size_t{0U};
+  for (auto const& candidate : candidates) {
+    auto const total = totals.at(candidate.transport_);
+    if (!total.has_value() || *total == 0U ||
+        std::ranges::find(selected, candidate.transport_) != end(selected) ||
+        *total > max_events - selected_events) {
+      continue;
+    }
+    selected.push_back(candidate.transport_);
+    selected_events += *total;
+  }
+  return selected;
+}
+
 namespace {
 
 struct event_update {
@@ -27,6 +62,7 @@ struct event_update {
   n::event_type event_type_{n::event_type::kArr};
   n::unixtime_t time_{};
   n::duration_t delay_{};
+  std::int64_t selected_timestamp_seconds_{};
 };
 
 struct prepared_trip {
@@ -35,46 +71,66 @@ struct prepared_trip {
   std::vector<event_update> updates_;
 };
 
+using rendered_event_key =
+    std::tuple<n::transport, bool, n::stop_idx_t, n::stop_idx_t, unsigned,
+               vehicle_prediction_event_type>;
+
+rendered_event_key key(n::transport const transport,
+                       std::optional<n::interval<n::stop_idx_t>> const& range,
+                       unsigned const sequence,
+                       vehicle_prediction_event_type const event_type) {
+  auto const value = range.value_or(n::interval<n::stop_idx_t>{});
+  return {transport, range.has_value(), value.from_, value.to_, sequence,
+          event_type};
+}
+
+rendered_event_key key(
+    vehicle_prediction_overlay_state::rendered_event const& event) {
+  return key(event.transport_, event.trip_stop_range_,
+             event.static_stop_sequence_, event.event_type_);
+}
+
+using rendered_event_index = std::map<rendered_event_key, std::size_t>;
+
 std::optional<std::int64_t> previous_delay(
     vehicle_prediction_overlay_state const& state,
+    rendered_event_index const& index,
     selected_vehicle_prediction_trip const& trip,
     vehicle_stop_prediction const& prediction) {
-  auto const it =
-      std::ranges::find_if(state.rendered_events_, [&](auto const& event) {
-        return event.transport_ == trip.transport_ &&
-               event.trip_stop_range_ == trip.trip_stop_range_ &&
-               event.static_stop_sequence_ ==
-                   prediction.static_stop_sequence_ &&
-               event.event_type_ == prediction.event_type_;
-      });
-  return it == end(state.rendered_events_) ? std::nullopt
-                                           : std::optional{it->delay_minutes_};
+  auto const it = index.find(key(trip.transport_, trip.trip_stop_range_,
+                                 prediction.static_stop_sequence_,
+                                 prediction.event_type_));
+  return it == end(index)
+             ? std::nullopt
+             : std::optional{state.rendered_events_[it->second].delay_minutes_};
 }
 
 void remember_delay(vehicle_prediction_overlay_state& state,
+                    rendered_event_index& index,
                     selected_vehicle_prediction_trip const& trip,
                     vehicle_stop_prediction const& prediction,
                     std::int64_t const minutes,
-                    std::optional<std::int64_t> const effective_timestamp) {
-  auto const it =
-      std::ranges::find_if(state.rendered_events_, [&](auto const& event) {
-        return event.transport_ == trip.transport_ &&
-               event.trip_stop_range_ == trip.trip_stop_range_ &&
-               event.static_stop_sequence_ ==
-                   prediction.static_stop_sequence_ &&
-               event.event_type_ == prediction.event_type_;
-      });
-  if (it == end(state.rendered_events_)) {
+                    std::optional<std::int64_t> const effective_timestamp,
+                    std::optional<std::int64_t> const selected_timestamp) {
+  auto const event_key = key(trip.transport_, trip.trip_stop_range_,
+                             prediction.static_stop_sequence_,
+                             prediction.event_type_);
+  auto const it = index.find(event_key);
+  if (it == end(index)) {
+    index.emplace(event_key, state.rendered_events_.size());
     state.rendered_events_.push_back(
         {.transport_ = trip.transport_,
          .trip_stop_range_ = trip.trip_stop_range_,
          .static_stop_sequence_ = prediction.static_stop_sequence_,
          .event_type_ = prediction.event_type_,
          .delay_minutes_ = minutes,
-         .effective_timestamp_seconds_ = effective_timestamp});
+         .effective_timestamp_seconds_ = effective_timestamp,
+         .selected_timestamp_seconds_ = selected_timestamp});
   } else {
-    it->delay_minutes_ = minutes;
-    it->effective_timestamp_seconds_ = effective_timestamp;
+    auto& event = state.rendered_events_[it->second];
+    event.delay_minutes_ = minutes;
+    event.effective_timestamp_seconds_ = effective_timestamp;
+    event.selected_timestamp_seconds_ = selected_timestamp;
   }
 }
 
@@ -104,7 +160,8 @@ std::optional<prepared_trip> prepare_updates(
     n::rt_timetable const& rtt,
     selected_vehicle_prediction_trip const& trip,
     vehicle_prediction_overlay_policy const& policy,
-    vehicle_prediction_overlay_state const& state) {
+    vehicle_prediction_overlay_state const& state,
+    rendered_event_index const& index) {
   auto run = n::rt::frun::from_t(tt, &rtt, trip.transport_);
   if (!run.valid()) {
     return std::nullopt;
@@ -138,7 +195,8 @@ std::optional<prepared_trip> prepare_updates(
       return std::nullopt;
     }
     auto const delay_minutes = round_delay_minutes(
-        prediction.delay_seconds_, previous_delay(state, trip, prediction),
+        prediction.delay_seconds_,
+        previous_delay(state, index, trip, prediction),
         policy.minute_rounding_deadband_seconds_);
     auto delay_seconds = std::int64_t{};
     auto selected_seconds = std::int64_t{};
@@ -148,10 +206,17 @@ std::optional<prepared_trip> prepare_updates(
                                delay_seconds, &selected_seconds)) {
       return std::nullopt;
     }
+    auto exact_selected_seconds = prediction.predicted_timestamp_seconds_;
     if (event_type == n::event_type::kDep) {
-      selected_seconds = std::max(
-          selected_seconds, prediction.scheduled_timestamp_seconds_ -
-                                policy.early_departure_tolerance_seconds_);
+      auto const tolerance =
+          std::max(std::int64_t{0}, policy.early_departure_tolerance_seconds_);
+      auto const earliest =
+          prediction.scheduled_timestamp_seconds_ <
+                  std::numeric_limits<std::int64_t>::min() + tolerance
+              ? std::numeric_limits<std::int64_t>::min()
+              : prediction.scheduled_timestamp_seconds_ - tolerance;
+      selected_seconds = std::max(selected_seconds, earliest);
+      exact_selected_seconds = std::max(exact_selected_seconds, earliest);
     }
     auto const selected_duration =
         event_type == n::event_type::kDep
@@ -165,7 +230,8 @@ std::optional<prepared_trip> prepare_updates(
          .static_stop_sequence_ = prediction.static_stop_sequence_,
          .event_type_ = event_type,
          .time_ = selected_time,
-         .delay_ = selected_time - run[*stop_idx].scheduled_time(event_type)});
+         .delay_ = selected_time - run[*stop_idx].scheduled_time(event_type),
+         .selected_timestamp_seconds_ = exact_selected_seconds});
   }
   if (updates.empty()) {
     return std::nullopt;
@@ -247,13 +313,16 @@ void apply_prepared_trip(n::timetable const& tt,
                          n::rt_timetable& rtt,
                          prepared_trip const& prepared,
                          vehicle_prediction_overlay_policy const& policy,
-                         vehicle_prediction_overlay_state& state) {
+                         vehicle_prediction_overlay_state& state,
+                         rendered_event_index& index) {
   auto const& trip = *prepared.trip_;
   auto rt_transport = rtt.resolve_rt(trip.transport_);
   if (rt_transport == n::rt_transport_idx_t::invalid()) {
     rt_transport = rtt.add_rt_transport(trip.source_, tt, trip.transport_);
   }
-  auto const run = n::rt::run{.t_ = trip.transport_, .rt_ = rt_transport};
+  auto const run = n::rt::run{.t_ = trip.transport_,
+                              .stop_range_ = prepared.range_,
+                              .rt_ = rt_transport};
   for (auto const& update : prepared.updates_) {
     auto const stop_idx = absolute_stop(prepared, update);
     rtt.update_time(rt_transport, stop_idx, update.event_type_, update.time_);
@@ -271,15 +340,18 @@ void apply_prepared_trip(n::timetable const& tt,
                  candidate.event_type_ == event_type;
         });
     remember_delay(
-        state, trip, prediction,
+        state, index, trip, prediction,
         update == end(prepared.updates_)
             ? round_delay_minutes(prediction.delay_seconds_,
-                                  previous_delay(state, trip, prediction),
+                                  previous_delay(state, index, trip, prediction),
                                   policy.minute_rounding_deadband_seconds_)
             : update->delay_.count(),
         update == end(prepared.updates_)
             ? std::nullopt
-            : std::optional{to_seconds(update->time_)});
+            : std::optional{to_seconds(update->time_)},
+        update == end(prepared.updates_)
+            ? std::nullopt
+            : std::optional{update->selected_timestamp_seconds_});
   }
 }
 
@@ -298,6 +370,10 @@ vehicle_prediction_overlay_result apply_vehicle_prediction_overlay(
              trip.trip_stop_range_ == event.trip_stop_range_;
     });
   });
+  auto index = rendered_event_index{};
+  for (auto const [i, event] : utl::enumerate(state.rendered_events_)) {
+    index.emplace(key(event), i);
+  }
   auto groups =
       std::map<n::transport,
                std::vector<selected_vehicle_prediction_trip const*>>{};
@@ -308,7 +384,7 @@ vehicle_prediction_overlay_result apply_vehicle_prediction_overlay(
     auto prepared = std::vector<prepared_trip>{};
     prepared.reserve(group.size());
     for (auto const* trip : group) {
-      auto updates = prepare_updates(tt, rtt, *trip, policy, state);
+      auto updates = prepare_updates(tt, rtt, *trip, policy, state, index);
       if (updates.has_value()) {
         prepared.emplace_back(std::move(*updates));
       }
@@ -322,7 +398,7 @@ vehicle_prediction_overlay_result apply_vehicle_prediction_overlay(
       return trip.range_.from_;
     });
     for (auto const& trip : prepared) {
-      apply_prepared_trip(tt, rtt, trip, policy, state);
+      apply_prepared_trip(tt, rtt, trip, policy, state, index);
     }
     result.applied_trips_ += prepared.size();
     result.applied_transports_.push_back(transport);

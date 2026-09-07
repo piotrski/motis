@@ -38,13 +38,11 @@ api::VehiclePositionsResponse vehicles::operator()(
     return res;
   }
 
-  auto const update_interval =
-      config_.timetable_.has_value()
-          ? std::chrono::seconds{config_.timetable_->update_interval_}
-          : std::chrono::seconds{60};
-  auto const default_max_age =
-      std::max(std::chrono::seconds{60}, 3 * update_interval);
-  auto const max_age = query.maxAge_.value_or(default_max_age.count());
+  auto const update_interval = config_.timetable_.has_value()
+                                   ? config_.timetable_->update_interval_
+                                   : 60U;
+  auto const max_age = query.maxAge_.value_or(
+      vehicle_matching::default_max_age(update_interval));
   utl::verify<net::bad_request_exception>(
       max_age >= 0, "maxAge must be greater than or equal to zero");
   auto const now = std::chrono::duration_cast<std::chrono::seconds>(

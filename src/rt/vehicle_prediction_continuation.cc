@@ -230,6 +230,7 @@ bool consistent_continuation(continuation_entries const& entries) {
   auto const reference = first.gps_->reference_timestamp_seconds_;
   return std::ranges::all_of(entries, [&](auto const* entry) {
     return entry->trip_stop_range_ == first.trip_stop_range_ &&
+           entry->mode_ == first.mode_ &&
            entry->incoming_leg_provenance_ == first.incoming_leg_provenance_ &&
            entry->gps_->reference_timestamp_seconds_ == reference;
   });
@@ -246,7 +247,7 @@ vehicle_prediction_cycle_result rebuild_continuation(
   auto retained = vehicle_prediction_cycle_result{
       .feed_ = provenance.feed_,
       .trip_id_ = trip_id,
-      .mode_ = provenance.mode_,
+      .mode_ = first.mode_.value_or(provenance.mode_),
       .trip_stop_range_ = first.trip_stop_range_,
       .context_ = vehicle_prediction_context::kIncomingBlockLeg,
       .incoming_leg_provenance_ = provenance,

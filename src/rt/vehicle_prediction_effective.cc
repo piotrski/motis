@@ -65,11 +65,19 @@ vehicle_prediction_selection select_effective_vehicle_prediction(
                               min_gps_confidence);
   }
   auto const gps_ok = input.gps_.has_value() && !rejection.has_value();
+  auto const provider_reference_floor = [&] {
+    auto const reference = input.provider_->reference_timestamp_seconds_;
+    auto const tolerance =
+        std::max(std::int64_t{0},
+                 policy.provider_timestamp_tolerance_seconds_);
+    return reference < std::numeric_limits<std::int64_t>::min() + tolerance
+               ? std::numeric_limits<std::int64_t>::min()
+               : reference - tolerance;
+  };
   auto const gps_recent_enough =
-      !provider_ok || (input.gps_.has_value() &&
-                       input.gps_->reference_timestamp_seconds_ >=
-                           input.provider_->reference_timestamp_seconds_ -
-                               policy.provider_timestamp_tolerance_seconds_);
+      !provider_ok || !input.provider_->reference_timestamp_known_ ||
+      (input.gps_.has_value() &&
+       input.gps_->reference_timestamp_seconds_ >= provider_reference_floor());
   if (gps_ok && gps_recent_enough) {
     return choose(*input.gps_, vehicle_prediction_selection_reason::kGpsOnly);
   }

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <utility>
 
 #ifdef NO_DATA
@@ -17,6 +19,15 @@
 namespace motis {
 
 namespace {
+
+std::optional<std::int64_t> provider_reference_timestamp(
+    std::uint64_t const timestamp) {
+  return timestamp <=
+                 static_cast<std::uint64_t>(
+                     std::numeric_limits<std::int64_t>::max())
+             ? std::optional{static_cast<std::int64_t>(timestamp)}
+             : std::nullopt;
+}
 
 std::optional<scheduled_provider_stop> find_scheduled_stop(
     resolved_provider_trip const& resolved, unsigned const sequence) {
@@ -122,11 +133,11 @@ provider_timing_extraction extract_provider_timing(
         .trip_stop_range_ = resolved->trip_stop_range_,
         .feed_timestamp_seconds_ =
             message.has_header() && message.header().has_timestamp()
-                ? std::optional<std::int64_t>{message.header().timestamp()}
+                ? provider_reference_timestamp(message.header().timestamp())
                 : std::nullopt,
         .trip_update_timestamp_seconds_ =
             update.has_timestamp()
-                ? std::optional<std::int64_t>{update.timestamp()}
+                ? provider_reference_timestamp(update.timestamp())
                 : std::nullopt,
         .trip_id_ = resolved->trip_id_,
         .mode_ = resolved->mode_,

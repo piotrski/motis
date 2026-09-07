@@ -67,17 +67,24 @@ vehicle_prediction_rejection_reason rejection_for(
   std::unreachable();
 }
 
+std::int64_t evaluation_time(vehicle_observation const& observation,
+                             std::int64_t const now) {
+  return std::min({observation_time(observation), observation.ingested_time_,
+                   now});
+}
+
 progress_projection_attempt project_observations(
     trip_progress_projector& projector,
     n::rt::frun const& run,
-    std::span<vehicle_observation const* const> observations) {
+    std::span<vehicle_observation const* const> observations,
+    std::int64_t const now) {
   auto attempt = progress_projection_attempt{};
   attempt.samples_.reserve(observations.size());
   auto prior = std::optional<trip_progress>{};
   for (auto const [index, observation] : utl::enumerate(observations)) {
-    auto const timestamp = observation_time(*observation);
+    auto const timestamp = evaluation_time(*observation, now);
     if (index + 1U < observations.size() &&
-        observation_time(*observations[index + 1U]) == timestamp) {
+        evaluation_time(*observations[index + 1U], now) == timestamp) {
       continue;
     }
     if (!attempt.samples_.empty() &&
@@ -105,7 +112,8 @@ progress_projection_attempt newest_valid_progress_suffix(
     trip_progress_projector& projector,
     n::rt::frun const& run,
     std::span<vehicle_observation const* const> observations,
-    std::size_t const min_observations) {
+    std::size_t const min_observations,
+    std::int64_t const now) {
   auto last_rejection =
       vehicle_prediction_rejection_reason::kInvalidObservationTime;
   auto const candidate_starts =
@@ -114,8 +122,8 @@ progress_projection_attempt newest_valid_progress_suffix(
   // IN_TRANSIT_TO section estimate. Keep the longest consistent suffix and
   // always require the newest position.
   for (auto const [start, _] : utl::enumerate(candidate_starts)) {
-    auto attempt =
-        project_observations(projector, run, observations.subspan(start));
+    auto attempt = project_observations(projector, run,
+                                        observations.subspan(start), now);
     if (!attempt.rejection_.has_value() &&
         attempt.samples_.size() >= min_observations) {
       return attempt;
@@ -128,7 +136,8 @@ progress_projection_attempt newest_valid_progress_suffix(
   // motion prefix because its declared stop and 25 m anchor are checked below;
   // unlike a moving estimate, it needs no inferred velocity.
   if (observations.back()->current_status_ == "STOPPED_AT") {
-    auto attempt = project_observations(projector, run, observations.last(1U));
+    auto attempt =
+        project_observations(projector, run, observations.last(1U), now);
     if (!attempt.rejection_.has_value()) {
       return attempt;
     }
@@ -314,7 +323,8 @@ vehicle_prediction_batch vehicle_prediction_engine::evaluate(
   auto usable = std::vector<vehicle_observation const*>{};
   usable.reserve(observations.size());
   for (auto const& observation : observations) {
-    if (observation_time(observation) <= now) {
+    if (observation_time(observation) <= now ||
+        observation.ingested_time_ <= now) {
       usable.push_back(&observation);
     }
   }
@@ -326,11 +336,11 @@ vehicle_prediction_batch vehicle_prediction_engine::evaluate(
                : reject(vehicle_prediction_rejection_reason::kStaleHistory);
   }
 
-  std::ranges::sort(usable, [](auto const* a, auto const* b) {
-    return std::pair{observation_time(*a), a->ingested_time_} <
-           std::pair{observation_time(*b), b->ingested_time_};
+  std::ranges::sort(usable, [&](auto const* a, auto const* b) {
+    return std::pair{evaluation_time(*a, now), a->ingested_time_} <
+           std::pair{evaluation_time(*b, now), b->ingested_time_};
   });
-  auto const latest_time = observation_time(*usable.back());
+  auto const latest_time = evaluation_time(*usable.back(), now);
   if (latest_time < now - impl_->policy_.max_observation_age_seconds_) {
     result.diagnostics_.fresh_observation_count_ = 0U;
     return reject(vehicle_prediction_rejection_reason::kStaleHistory);
@@ -343,7 +353,8 @@ vehicle_prediction_batch vehicle_prediction_engine::evaluate(
   auto window_begin = usable.size() - 1U;
   auto next_distinct_time = latest_time;
   while (window_begin != 0U) {
-    auto const previous_time = observation_time(*usable[window_begin - 1U]);
+    auto const previous_time =
+        evaluation_time(*usable[window_begin - 1U], now);
     if (previous_time == next_distinct_time) {
       --window_begin;
       continue;
@@ -363,7 +374,7 @@ vehicle_prediction_batch vehicle_prediction_engine::evaluate(
     return reject(vehicle_prediction_rejection_reason::kInsufficientHistory);
   }
   auto projection = newest_valid_progress_suffix(
-      impl_->projector_, run, usable, impl_->policy_.min_observations_);
+      impl_->projector_, run, usable, impl_->policy_.min_observations_, now);
   if (projection.rejection_.has_value()) {
     return reject(*projection.rejection_);
   }
@@ -405,8 +416,14 @@ vehicle_prediction_batch vehicle_prediction_engine::evaluate(
   auto const anchor_schedule = latest.stopped_at_
                                    ? anchor_stop.scheduled_departure_time_
                                    : anchor_stop.scheduled_arrival_time_;
-  if (latest.stopped_at_ && stop_idx == 0U) {
-    predicted_anchor = std::max(predicted_anchor, anchor_schedule);
+  if (latest.stopped_at_) {
+    auto const tolerance = std::max(
+        std::int64_t{0}, impl_->policy_.early_departure_tolerance_seconds_);
+    auto const earliest =
+        anchor_schedule < std::numeric_limits<std::int64_t>::min() + tolerance
+            ? std::numeric_limits<std::int64_t>::min()
+            : anchor_schedule - tolerance;
+    predicted_anchor = std::max(predicted_anchor, earliest);
   }
   auto const delay = predicted_anchor - anchor_schedule;
   result.delay_anchor_static_stop_sequence_ = anchor_stop.static_stop_sequence_;
@@ -416,7 +433,7 @@ vehicle_prediction_batch vehicle_prediction_engine::evaluate(
   result.predictions_.reserve((timeline->size() - stop_idx) * 2U);
   for (auto i = stop_idx; i != timeline->size(); ++i) {
     auto const& stop = (*timeline)[i];
-    for (auto const [event_type, scheduled] :
+    for (auto const& [event_type, scheduled] :
          {std::pair{vehicle_prediction_event_type::kArrival,
                     stop.scheduled_arrival_time_},
           std::pair{vehicle_prediction_event_type::kDeparture,

@@ -58,7 +58,9 @@ bool vehicle_eta_runtime_control::reload() {
       if (auto const* modes = object.if_contains("modes")) {
         item.modes_ = std::vector<nigiri::clasz>{};
         for (auto const& entry : modes->as_array()) {
-          item.modes_->push_back(nigiri::to_clasz(entry.as_string()));
+          auto const& name = entry.as_string();
+          item.modes_->push_back(parse_vehicle_eta_clasz(
+              std::string_view{name.data(), name.size()}));
         }
         if (item.modes_->empty()) {
           return false;

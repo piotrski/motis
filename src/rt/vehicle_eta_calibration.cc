@@ -3,18 +3,25 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string_view>
+#include <thread>
 
 #include "boost/json.hpp"
 
 #include "nigiri/clasz.h"
+#include "nigiri/logging.h"
 
 namespace fs = std::filesystem;
 
@@ -38,18 +45,6 @@ std::optional<std::string_view> horizon_bucket(std::int64_t const seconds) {
     return "10-20";
   }
   return "20-40";
-}
-
-std::string event_key_prefix(vehicle_prediction_cycle_result const& candidate,
-                             unsigned const sequence) {
-  return candidate.feed_ + "|" + candidate.trip_id_ + "|" +
-         std::to_string(sequence) + "|";
-}
-
-std::string event_key(vehicle_prediction_cycle_result const& candidate,
-                      unsigned const sequence,
-                      std::int64_t const scheduled) {
-  return event_key_prefix(candidate, sequence) + std::to_string(scheduled);
 }
 
 double percentile(std::vector<std::int64_t> values, double const quantile) {
@@ -91,14 +86,144 @@ boost::json::array bootstrap_median_absolute_error_ci(
   return {percentile(medians, 0.025), percentile(medians, 0.975)};
 }
 
+void rotate_and_prune(fs::path const& directory,
+                      vehicle_eta_calibration::limits const& limits,
+                      std::int64_t const now,
+                      std::uintmax_t const incoming_bytes) {
+  auto const current = directory / "calibration.jsonl";
+  auto ec = std::error_code{};
+  if (fs::exists(current, ec) && fs::file_size(current, ec) != 0U &&
+      fs::file_size(current, ec) + incoming_bytes > limits.max_file_bytes_) {
+    fs::rename(current,
+               directory / ("calibration-" + std::to_string(now) + ".jsonl"),
+               ec);
+  }
+  for (auto const& entry : fs::directory_iterator{directory, ec}) {
+    if (entry.path() == current || entry.path().extension() != ".jsonl") {
+      continue;
+    }
+    auto const modified = fs::last_write_time(entry.path(), ec);
+    if (ec) {
+      continue;
+    }
+    auto const age = fs::file_time_type::clock::now() - modified;
+    if (age > std::chrono::seconds{limits.retention_seconds_}) {
+      fs::remove(entry.path(), ec);
+    }
+  }
+}
+
 }  // namespace
+
+struct vehicle_eta_calibration::persistence {
+  struct batch {
+    std::vector<std::string> lines_;
+    std::int64_t now_{};
+    std::uintmax_t bytes_{};
+  };
+
+  persistence(fs::path directory, limits const policy)
+      : directory_{std::move(directory)},
+        limits_{policy},
+        worker_{[this]() { run(); }} {}
+
+  ~persistence() {
+    {
+      auto lock = std::lock_guard{mutex_};
+      closing_ = true;
+    }
+    ready_.notify_one();
+    worker_.join();
+  }
+
+  bool enqueue(batch value) {
+    auto lock = std::lock_guard{mutex_};
+    if (value.bytes_ > limits_.max_pending_bytes_ ||
+        outstanding_bytes_ > limits_.max_pending_bytes_ - value.bytes_) {
+      return false;
+    }
+    outstanding_bytes_ += value.bytes_;
+    queue_.emplace_back(std::move(value));
+    ready_.notify_one();
+    return true;
+  }
+
+  void flush() {
+    auto lock = std::unique_lock{mutex_};
+    drained_.wait(lock, [&]() { return outstanding_bytes_ == 0U; });
+  }
+
+  std::pair<std::size_t, std::uintmax_t> failures() const {
+    return {failed_records_.load(std::memory_order_relaxed),
+            failed_bytes_.load(std::memory_order_relaxed)};
+  }
+
+private:
+  void run() {
+    while (true) {
+      auto value = batch{};
+      {
+        auto lock = std::unique_lock{mutex_};
+        ready_.wait(lock, [&]() { return closing_ || !queue_.empty(); });
+        if (queue_.empty()) {
+          return;
+        }
+        value = std::move(queue_.front());
+        queue_.pop_front();
+      }
+      try {
+        fs::create_directories(directory_);
+        rotate_and_prune(directory_, limits_, value.now_, value.bytes_);
+        auto output = std::ofstream{directory_ / "calibration.jsonl",
+                                    std::ios::app | std::ios::binary};
+        for (auto const& line : value.lines_) {
+          output << line << '\n';
+        }
+        output.flush();
+        if (!output) {
+          throw std::runtime_error{"unable to persist calibration batch"};
+        }
+      } catch (std::exception const& e) {
+        failed_records_.fetch_add(value.lines_.size(),
+                                  std::memory_order_relaxed);
+        failed_bytes_.fetch_add(value.bytes_, std::memory_order_relaxed);
+        nigiri::log(nigiri::log_lvl::error, "motis.rt",
+                    "CALIBRATION PERSISTENCE ERROR: {}", e.what());
+      } catch (...) {
+        failed_records_.fetch_add(value.lines_.size(),
+                                  std::memory_order_relaxed);
+        failed_bytes_.fetch_add(value.bytes_, std::memory_order_relaxed);
+        nigiri::log(nigiri::log_lvl::error, "motis.rt",
+                    "CALIBRATION PERSISTENCE ERROR: unknown");
+      }
+      {
+        auto lock = std::lock_guard{mutex_};
+        outstanding_bytes_ -= value.bytes_;
+      }
+      drained_.notify_all();
+    }
+  }
+
+  fs::path directory_;
+  limits limits_;
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::condition_variable drained_;
+  std::deque<batch> queue_;
+  std::uintmax_t outstanding_bytes_{};
+  bool closing_{};
+  std::thread worker_;
+  std::atomic<std::size_t> failed_records_{};
+  std::atomic<std::uintmax_t> failed_bytes_{};
+};
 
 vehicle_eta_calibration::vehicle_eta_calibration(fs::path directory)
     : vehicle_eta_calibration{std::move(directory), limits{}} {}
 
 vehicle_eta_calibration::vehicle_eta_calibration(fs::path directory,
                                                  limits const policy)
-    : directory_{std::move(directory)}, limits_{policy} {}
+    : directory_{std::move(directory)},
+      persistence_{std::make_unique<persistence>(directory_, policy)} {}
 
 vehicle_eta_calibration::~vehicle_eta_calibration() = default;
 
@@ -130,10 +255,13 @@ vehicle_eta_calibration::ingest_result vehicle_eta_calibration::ingest(
       if (!bucket.has_value()) {
         continue;
       }
-      auto const key = event_key(candidate, prediction.static_stop_sequence_,
-                                 prediction.scheduled_timestamp_seconds_);
-      auto const unique = key + "|" + std::string{*bucket};
-      if (completed_.contains(unique) || forecasts_.contains(unique)) {
+      auto const key = event_key{
+          .feed_ = candidate.feed_,
+          .trip_id_ = candidate.trip_id_,
+          .stop_sequence_ = prediction.static_stop_sequence_,
+          .scheduled_seconds_ = prediction.scheduled_timestamp_seconds_,
+          .bucket_ = std::string{*bucket}};
+      if (completed_.contains(key) || forecasts_.contains(key)) {
         continue;
       }
       auto const provider = std::ranges::find_if(
@@ -145,7 +273,7 @@ vehicle_eta_calibration::ingest_result vehicle_eta_calibration::ingest(
                        prediction.scheduled_timestamp_seconds_;
           });
       forecasts_.emplace(
-          unique,
+          key,
           forecast{
               .feed_ = candidate.feed_,
               .trip_id_ = candidate.trip_id_,
@@ -165,10 +293,16 @@ vehicle_eta_calibration::ingest_result vehicle_eta_calibration::ingest(
       if (passage.uncertainty_seconds_ > 2 * update_interval_seconds) {
         continue;
       }
-      auto const prefix =
-          event_key_prefix(candidate, passage.static_stop_sequence_);
-      for (auto it = forecasts_.lower_bound(prefix);
-           it != end(forecasts_) && it->first.starts_with(prefix);) {
+      auto const first = event_key{
+          .feed_ = candidate.feed_,
+          .trip_id_ = candidate.trip_id_,
+          .stop_sequence_ = passage.static_stop_sequence_,
+          .scheduled_seconds_ = std::numeric_limits<std::int64_t>::min(),
+          .bucket_ = {}};
+      for (auto it = forecasts_.lower_bound(first);
+           it != end(forecasts_) && it->first.feed_ == candidate.feed_ &&
+           it->first.trip_id_ == candidate.trip_id_ &&
+           it->first.stop_sequence_ == passage.static_stop_sequence_;) {
         auto const& forecast = it->second;
         if (passage.observed_timestamp_seconds_ <= forecast.captured_seconds_) {
           ++it;
@@ -197,37 +331,32 @@ vehicle_eta_calibration::ingest_result vehicle_eta_calibration::ingest(
       }
     }
   }
-  auto const appended_bytes =
-      records.empty() ? std::uintmax_t{0U} : append(records, now);
-  return {.pending_entries_ = forecasts_.size(),
-          .completed_entries_ = completed_.size(),
-          .appended_records_ = records.size(),
-          .appended_bytes_ = appended_bytes};
-}
-
-std::uintmax_t vehicle_eta_calibration::append(
-    std::span<boost::json::object const> const records,
-    std::int64_t const now) {
-  fs::create_directories(directory_);
-  auto serialized = std::vector<std::string>{};
-  serialized.reserve(records.size());
-  auto incoming_bytes = std::uintmax_t{0U};
+  auto batch = persistence::batch{.lines_ = {}, .now_ = now, .bytes_ = 0U};
+  batch.lines_.reserve(records.size());
   for (auto const& record : records) {
     auto line = boost::json::serialize(record);
-    incoming_bytes += line.size() + 1U;
-    serialized.emplace_back(std::move(line));
+    batch.bytes_ += line.size() + 1U;
+    batch.lines_.emplace_back(std::move(line));
   }
-  rotate_and_prune(now, incoming_bytes);
-  auto output = std::ofstream{directory_ / "calibration.jsonl",
-                              std::ios::app | std::ios::binary};
-  for (auto const& line : serialized) {
-    output << line << '\n';
-  }
-  output.flush();
-  return incoming_bytes;
+  auto const record_count = batch.lines_.size();
+  auto const bytes = batch.bytes_;
+  auto const queued =
+      records.empty() || persistence_->enqueue(std::move(batch));
+  auto const [failed_records, failed_bytes] = persistence_->failures();
+  return {.pending_entries_ = forecasts_.size(),
+          .completed_entries_ = completed_.size(),
+          .queued_records_ = queued ? record_count : 0U,
+          .queued_bytes_ = queued ? bytes : 0U,
+          .dropped_records_ = queued ? 0U : record_count,
+          .dropped_bytes_ = queued ? 0U : bytes,
+          .persistence_failed_records_ = failed_records,
+          .persistence_failed_bytes_ = failed_bytes};
 }
 
+void vehicle_eta_calibration::flush() const { persistence_->flush(); }
+
 void vehicle_eta_calibration::generate_report() const {
+  flush();
   fs::create_directories(directory_);
   struct aggregate {
     std::vector<std::int64_t> gps_errors_;
@@ -314,31 +443,6 @@ void vehicle_eta_calibration::generate_report() const {
     output.flush();
   }
   fs::rename(temporary, directory_ / "report.json", ec);
-}
-
-void vehicle_eta_calibration::rotate_and_prune(
-    std::int64_t const now, std::uintmax_t const incoming_bytes) {
-  auto const current = directory_ / "calibration.jsonl";
-  auto ec = std::error_code{};
-  if (fs::exists(current, ec) && fs::file_size(current, ec) != 0U &&
-      fs::file_size(current, ec) + incoming_bytes > limits_.max_file_bytes_) {
-    fs::rename(current,
-               directory_ / ("calibration-" + std::to_string(now) + ".jsonl"),
-               ec);
-  }
-  for (auto const& entry : fs::directory_iterator{directory_, ec}) {
-    if (entry.path() == current || entry.path().extension() != ".jsonl") {
-      continue;
-    }
-    auto const modified = fs::last_write_time(entry.path(), ec);
-    if (ec) {
-      continue;
-    }
-    auto const age = fs::file_time_type::clock::now() - modified;
-    if (age > std::chrono::seconds{limits_.retention_seconds_}) {
-      fs::remove(entry.path(), ec);
-    }
-  }
 }
 
 std::vector<boost::json::value> vehicle_eta_calibration::read_records(

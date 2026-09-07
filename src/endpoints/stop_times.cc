@@ -678,6 +678,10 @@ api::stoptimes_response stop_times::operator()(
   auto const decoded_cursor = api_version >= 6 && query.pageCursor_.has_value()
                                   ? decode_cursor(*query.pageCursor_)
                                   : std::nullopt;
+  auto const legacy_cursor = api_version < 6 && query.pageCursor_.has_value()
+                                 ? std::optional{
+                                       parse_cursor(*query.pageCursor_)}
+                                 : std::nullopt;
   if (api_version >= 6 && query.pageCursor_.has_value()) {
     utl::verify<net::bad_request_exception>(decoded_cursor.has_value(),
                                             "invalid v6 page cursor");
@@ -694,11 +698,15 @@ api::stoptimes_response stop_times::operator()(
           .count();
   auto const cursor_direction = decoded_cursor.has_value()
                                     ? decoded_cursor->direction_
+                                : legacy_cursor.has_value()
+                                    ? legacy_cursor->first
                                 : std::string_view{default_direction} == "LATER"
                                     ? n::direction::kForward
                                     : n::direction::kBackward;
   auto const boundary_seconds = decoded_cursor.has_value()
                                     ? decoded_cursor->selected_seconds_
+                                : legacy_cursor.has_value()
+                                    ? to_seconds(legacy_cursor->second)
                                     : default_seconds;
   if (decoded_cursor.has_value()) {
     auto const cursor_in_range =
@@ -842,9 +850,12 @@ api::stoptimes_response stop_times::operator()(
                    : key.first > boundary_seconds) {
       return false;
     }
-    if (window.has_value() && (cursor_direction == n::direction::kForward
-                                   ? key.first > boundary_seconds + *window
-                                   : key.first < boundary_seconds - *window)) {
+    if (window.has_value() &&
+        seen_exact_keys.size() >=
+            static_cast<std::size_t>(query.n_.value_or(0)) &&
+        (cursor_direction == n::direction::kForward
+             ? key.first > boundary_seconds + *window
+             : key.first < boundary_seconds - *window)) {
       return false;
     }
     return seen_exact_keys.emplace(exact_key(run)).second;

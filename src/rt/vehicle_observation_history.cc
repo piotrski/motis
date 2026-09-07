@@ -405,6 +405,22 @@ void vehicle_observation_history::prune(
     erase_history(key);
   }
 
+  if (histories_.size() > policy.max_active_histories_) {
+    auto oldest = std::vector<
+        std::pair<std::pair<std::int64_t, std::int64_t>, vehicle_key>>{};
+    oldest.reserve(histories_.size());
+    for (auto const& [key, history] : histories_) {
+      oldest.emplace_back(order_key(history.observations_.back()), key);
+    }
+    std::ranges::sort(oldest, {}, [](auto const& entry) {
+      return entry.first;
+    });
+    auto const remove_count = histories_.size() - policy.max_active_histories_;
+    for (auto i = std::size_t{0U}; i != remove_count; ++i) {
+      erase_history(oldest[i].second);
+    }
+  }
+
   // Entity IDs can rotate while a stable vehicle descriptor remains the same.
   // Keep locator state only while an observation carrying that entity is still
   // retained, so the auxiliary identity index is bounded with the histories.
@@ -422,6 +438,14 @@ std::span<vehicle_observation const> vehicle_observation_history::observations(
     vehicle_key const& key) const {
   auto const it = histories_.find(key);
   return it == end(histories_)
+             ? std::span<vehicle_observation const>{}
+             : std::span<vehicle_observation const>{it->second.observations_};
+}
+
+std::span<vehicle_observation const> vehicle_observation_history::observations(
+    vehicle_key const& key, vehicle_trip_instance const& trip) const {
+  auto const it = histories_.find(key);
+  return it == end(histories_) || it->second.trip_ != trip
              ? std::span<vehicle_observation const>{}
              : std::span<vehicle_observation const>{it->second.observations_};
 }

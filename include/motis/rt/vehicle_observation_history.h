@@ -16,6 +16,7 @@ namespace motis {
 struct observation_history_policy {
   std::chrono::seconds max_age_;
   std::size_t max_observations_per_vehicle_;
+  std::size_t max_active_histories_{100'000U};
 };
 
 enum class vehicle_key_source { kVehicleDescriptor, kEntityId };
@@ -29,26 +30,26 @@ struct vehicle_key {
 };
 
 struct vehicle_trip_instance {
-  std::optional<std::string> trip_id_;
-  std::optional<std::string> start_date_;
-  std::optional<std::string> start_time_;
+  std::optional<std::string> trip_id_{};
+  std::optional<std::string> start_date_{};
+  std::optional<std::string> start_time_{};
 
   bool operator==(vehicle_trip_instance const&) const = default;
 };
 
 struct vehicle_observation {
-  std::string feed_id_;
-  std::string entity_id_;
-  std::optional<std::string> vehicle_id_;
-  vehicle_trip_instance trip_;
+  std::string feed_id_{};
+  std::string entity_id_{};
+  std::optional<std::string> vehicle_id_{};
+  vehicle_trip_instance trip_{};
   double latitude_{};
   double longitude_{};
-  std::optional<double> bearing_;
-  std::optional<double> speed_mps_;
-  std::optional<std::uint32_t> current_stop_sequence_;
-  std::optional<std::string> stop_id_;
-  std::optional<std::string> current_status_;
-  std::optional<std::int64_t> reported_time_;
+  std::optional<double> bearing_{};
+  std::optional<double> speed_mps_{};
+  std::optional<std::uint32_t> current_stop_sequence_{};
+  std::optional<std::string> stop_id_{};
+  std::optional<std::string> current_status_{};
+  std::optional<std::int64_t> reported_time_{};
   std::int64_t ingested_time_{};
 };
 
@@ -84,6 +85,9 @@ struct vehicle_observation_history {
 
   [[nodiscard]] std::span<vehicle_observation const> observations(
       vehicle_key const&) const;
+
+  [[nodiscard]] std::span<vehicle_observation const> observations(
+      vehicle_key const&, vehicle_trip_instance const&) const;
 
   // The effective observation is the newest by reported time (falling back to
   // ingest time), then ingest time. Late arrivals can therefore be retained

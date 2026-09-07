@@ -23,6 +23,8 @@ namespace motis {
 
 using headers_t = std::map<std::string, std::string>;
 
+[[nodiscard]] nigiri::clasz parse_vehicle_eta_clasz(std::string_view);
+
 struct config {
   friend std::ostream& operator<<(std::ostream&, config const&);
   static config read_simple(std::vector<std::string> const& args);

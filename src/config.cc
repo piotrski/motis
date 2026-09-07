@@ -21,8 +21,6 @@ namespace fs = std::filesystem;
 
 namespace motis {
 
-namespace {
-
 nigiri::clasz parse_vehicle_eta_clasz(std::string_view const mode) {
   if (mode == "AIRPLANE") {
     return nigiri::clasz::kAir;
@@ -45,8 +43,6 @@ nigiri::clasz parse_vehicle_eta_clasz(std::string_view const mode) {
   }
   return nigiri::to_clasz(mode);
 }
-
-}  // namespace
 
 template <rfl::internal::StringLiteral Name>
 consteval auto drop_last() {

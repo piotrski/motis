@@ -1,6 +1,9 @@
 #include "motis/rt/trip_progress_diagnostics.h"
 
 #include <algorithm>
+#include <map>
+#include <set>
+#include <string>
 #include <string_view>
 
 #include "geo/latlng.h"
@@ -14,6 +17,7 @@
 #include "motis/rt/vehicle_matching.h"
 #include "motis/rt/vehicle_observation_history.h"
 #include "motis/rt/vehicle_position.h"
+#include "motis/rt/vehicle_prediction_limits.h"
 #include "motis/tag_lookup.h"
 
 namespace n = nigiri;
@@ -33,6 +37,13 @@ vehicle_key key_for(vehicle_positions::vehicle_position const& vehicle) {
                            vehicle_key_source::kVehicleDescriptor}
              : vehicle_key{vehicle.feed_id_, vehicle.entity_id_,
                            vehicle_key_source::kEntityId};
+}
+
+vehicle_trip_instance trip_for(
+    vehicle_positions::vehicle_position const& vehicle) {
+  return {.trip_id_ = vehicle.trip_.trip_id_,
+          .start_date_ = vehicle.trip_.start_date_,
+          .start_time_ = vehicle.trip_.start_time_};
 }
 
 std::optional<vehicle_position_progress_constraint> constraint_for(
@@ -133,6 +144,22 @@ std::vector<trip_progress_diagnostic> evaluate_trip_progress_diagnostics(
   auto const max_age = c.timetable_->vehicle_eta_->history_.max_age_seconds_;
   auto const cutoff = vehicle_matching::freshness_cutoff(now, max_age);
 
+  auto enabled_feeds = std::set<std::string>{};
+  for (auto const& vehicle : positions.all()) {
+    auto const feed = vehicle_matching::dataset_tag(vehicle.feed_id_);
+    if (feed_enabled(c, control, feed)) {
+      enabled_feeds.emplace(feed);
+    }
+  }
+  auto const feed_count = std::max(std::size_t{1U}, enabled_feeds.size());
+  auto const evaluation_limit =
+      std::max(std::size_t{1U},
+               kMaxVehiclePredictionPositionsPerCycle / feed_count);
+  auto const resolution_limit =
+      std::max(std::size_t{1U},
+               kMaxVehiclePredictionResolutionsPerCycle / feed_count);
+  auto evaluated_positions = std::map<std::string, std::size_t>{};
+  auto resolved_positions = std::map<std::string, std::size_t>{};
   for (auto const& vehicle : positions.all()) {
     auto diagnostic = trip_progress_diagnostic{
         .feed_ = std::string{vehicle_matching::dataset_tag(vehicle.feed_id_)},
@@ -160,6 +187,9 @@ std::vector<trip_progress_diagnostic> evaluate_trip_progress_diagnostics(
       reject(trip_progress_diagnostic_status::kStale);
       continue;
     }
+    if (resolved_positions[diagnostic.feed_]++ >= resolution_limit) {
+      continue;
+    }
 
     auto run = vehicle_matching::resolve_run(tags, tt, rtt, vehicle);
     if (!run.has_value()) {
@@ -175,12 +205,16 @@ std::vector<trip_progress_diagnostic> evaluate_trip_progress_diagnostics(
         config::timetable::vehicle_eta::mode::off) {
       continue;
     }
+    if (evaluated_positions[diagnostic.feed_]++ >= evaluation_limit) {
+      continue;
+    }
     if (!projector.has_value()) {
       reject(trip_progress_diagnostic_status::kMissingShape);
       continue;
     }
 
-    auto const observations = history.observations(key_for(vehicle));
+    auto const observations =
+        history.observations(key_for(vehicle), trip_for(vehicle));
     if (observations.empty()) {
       reject(trip_progress_diagnostic_status::kMissingHistory);
       continue;

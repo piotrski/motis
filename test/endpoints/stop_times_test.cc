@@ -213,13 +213,13 @@ TEST(motis, stop_times) {
                       .predicted_timestamp_seconds_ = scheduled + 420,
                       .delay_seconds_ = 420,
                       .confidence_ = 0.8},
-              .latest_vehicle_observation_timestamp_seconds_ = scheduled - 15,
               .effective_ = {.source_ = vehicle_prediction_source::kProvider,
                              .predicted_timestamp_seconds_ = scheduled + 600,
                              .delay_seconds_ = 600},
               .selected_source_ = vehicle_prediction_source::kGps,
               .selection_reason_ = vehicle_prediction_selection_reason::
                   kProviderProgressInconsistent,
+              .latest_vehicle_observation_timestamp_seconds_ = scheduled - 15,
               .context_ = vehicle_prediction_context::kIncomingBlockLeg}},
             scheduled);
 
@@ -330,6 +330,19 @@ TEST(motis, stop_times) {
         first_page.nextPageCursor_));
     ASSERT_EQ(1U, second_page.stopTimes_.size());
     EXPECT_NE(ice.tripId_, second_page.stopTimes_.front().tripId_);
+
+    auto const legacy_first_page = stop_times(
+        "/api/v5/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T22:54:00.000Z&arriveBy=true&direction=LATER&n=1");
+    ASSERT_EQ(1U, legacy_first_page.stopTimes_.size());
+    auto legacy_next_cursor = legacy_first_page.nextPageCursor_;
+    legacy_next_cursor.replace(legacy_next_cursor.find('|'), 1U, "%7C");
+    auto const legacy_second_page = stop_times(fmt::format(
+        "/api/v5/stoptimes?stopId=test_FFM_10&arriveBy=true&n=1&pageCursor={}",
+        legacy_next_cursor));
+    ASSERT_EQ(1U, legacy_second_page.stopTimes_.size());
+    EXPECT_NE(legacy_first_page.stopTimes_.front().tripId_,
+              legacy_second_page.stopTimes_.front().tripId_);
 
     d.rt_->vehicle_prediction_diagnostics_ =
         vehicle_prediction_diagnostics_store::build(
@@ -512,9 +525,9 @@ TEST(motis, stop_times) {
     }
   }
   {
-    // window query EARLIER (small window large n)
+    // A v6 count extends a smaller window until the requested count is met.
     auto const res = stop_times(
-        "/api/v5/stoptimes?stopId=test_FFM_101"
+        "/api/v6/stoptimes?stopId=test_FFM_101"
         "&time=2019-04-30T23:15:00.000Z"
         "&arriveBy=true"
         "&direction=LATER"

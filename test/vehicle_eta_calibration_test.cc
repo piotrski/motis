@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -13,9 +14,13 @@ namespace {
 
 namespace fs = std::filesystem;
 
-vehicle_prediction_cycle_result candidate(std::int64_t const scheduled) {
+vehicle_prediction_cycle_result candidate(std::int64_t const scheduled,
+                                          std::string feed = "A",
+                                          std::string trip = "service-trip") {
   auto result = vehicle_prediction_cycle_result{
-      .feed_ = "A", .trip_id_ = "service-trip", .mode_ = nigiri::clasz::kBus};
+      .feed_ = std::move(feed),
+      .trip_id_ = std::move(trip),
+      .mode_ = nigiri::clasz::kBus};
   result.batch_.transport_ =
       nigiri::transport{nigiri::transport_idx_t{1U}, nigiri::day_idx_t{2U}};
   result.batch_.predictions_ = {
@@ -35,6 +40,33 @@ vehicle_prediction_cycle_result candidate(std::int64_t const scheduled) {
   return result;
 }
 
+TEST(vehicle_eta_calibration, distinguishes_delimiters_in_event_identity) {
+  auto const dir =
+      fs::temp_directory_path() / "motis-eta-calibration-key-test";
+  fs::remove_all(dir);
+  auto store = vehicle_eta_calibration{dir};
+  auto values = std::array{candidate(1'600, "A|B", "C"),
+                           candidate(1'600, "A", "B|C")};
+
+  auto const captured = store.ingest(values, 1'000, 60);
+
+  EXPECT_EQ(2U, captured.pending_entries_);
+  values.front().batch_.observed_passages_ = {
+      {.static_stop_sequence_ = 4U,
+       .observed_timestamp_seconds_ = 1'640,
+       .uncertainty_seconds_ = 20}};
+  auto const completed = store.ingest(values, 1'650, 60);
+  EXPECT_EQ(1U, completed.pending_entries_);
+  EXPECT_EQ(1U, completed.completed_entries_);
+  store.flush();
+  auto const records =
+      vehicle_eta_calibration::read_records(dir / "calibration.jsonl");
+  ASSERT_EQ(1U, records.size());
+  EXPECT_EQ("A|B", std::string{
+                         records.front().as_object().at("feed").as_string()});
+  fs::remove_all(dir);
+}
+
 TEST(vehicle_eta_calibration,
      captures_once_without_lookahead_and_scores_passage) {
   auto const dir = fs::temp_directory_path() / "motis-eta-calibration-test";
@@ -44,8 +76,8 @@ TEST(vehicle_eta_calibration,
   auto const captured = store.ingest({&value, 1U}, 1'000, 60);
   EXPECT_EQ(1U, captured.pending_entries_);
   EXPECT_EQ(0U, captured.completed_entries_);
-  EXPECT_EQ(0U, captured.appended_records_);
-  EXPECT_EQ(0U, captured.appended_bytes_);
+  EXPECT_EQ(0U, captured.queued_records_);
+  EXPECT_EQ(0U, captured.queued_bytes_);
   static_cast<void>(store.ingest({&value, 1U}, 1'010, 60));
   EXPECT_FALSE(fs::exists(dir / "calibration.jsonl"));
 
@@ -55,8 +87,10 @@ TEST(vehicle_eta_calibration,
   auto const completed = store.ingest({&value, 1U}, 1'650, 60);
   EXPECT_EQ(0U, completed.pending_entries_);
   EXPECT_EQ(1U, completed.completed_entries_);
-  EXPECT_EQ(1U, completed.appended_records_);
-  EXPECT_GT(completed.appended_bytes_, 0U);
+  EXPECT_EQ(1U, completed.queued_records_);
+  EXPECT_GT(completed.queued_bytes_, 0U);
+  EXPECT_EQ(0U, completed.dropped_records_);
+  store.flush();
   auto const records =
       vehicle_eta_calibration::read_records(dir / "calibration.jsonl");
   ASSERT_EQ(1U, records.size());
@@ -119,6 +153,74 @@ TEST(vehicle_eta_calibration, ignores_partial_final_jsonl_record) {
   auto const records = vehicle_eta_calibration::read_records(path);
   ASSERT_EQ(1U, records.size());
   fs::remove(path);
+}
+
+TEST(vehicle_eta_calibration, drops_batches_beyond_the_pending_byte_limit) {
+  auto const dir =
+      fs::temp_directory_path() / "motis-eta-calibration-bounded-test";
+  fs::remove_all(dir);
+  auto store = vehicle_eta_calibration{
+      dir, vehicle_eta_calibration::limits{.max_pending_bytes_ = 1U}};
+  auto value = candidate(1'600);
+  static_cast<void>(store.ingest({&value, 1U}, 1'000, 60));
+  value.batch_.observed_passages_ = {{.static_stop_sequence_ = 4U,
+                                      .observed_timestamp_seconds_ = 1'640,
+                                      .uncertainty_seconds_ = 20}};
+
+  auto const completed = store.ingest({&value, 1U}, 1'650, 60);
+
+  EXPECT_EQ(0U, completed.queued_records_);
+  EXPECT_EQ(1U, completed.dropped_records_);
+  EXPECT_GT(completed.dropped_bytes_, 1U);
+  store.flush();
+  EXPECT_FALSE(fs::exists(dir / "calibration.jsonl"));
+}
+
+TEST(vehicle_eta_calibration,
+     reports_persistence_failures_without_deadlocking) {
+  auto const parent =
+      fs::temp_directory_path() / "motis-eta-calibration-invalid-parent";
+  fs::remove_all(parent);
+  {
+    auto output = std::ofstream{parent};
+    output << "not a directory";
+  }
+  auto store = vehicle_eta_calibration{parent / "calibration"};
+  auto value = candidate(1'600);
+  static_cast<void>(store.ingest({&value, 1U}, 1'000, 60));
+  value.batch_.observed_passages_ = {{.static_stop_sequence_ = 4U,
+                                      .observed_timestamp_seconds_ = 1'640,
+                                      .uncertainty_seconds_ = 20}};
+  auto const queued = store.ingest({&value, 1U}, 1'650, 60);
+  ASSERT_EQ(1U, queued.queued_records_);
+
+  store.flush();
+  auto const after_failure = store.ingest({}, 1'660, 60);
+
+  EXPECT_EQ(1U, after_failure.persistence_failed_records_);
+  EXPECT_EQ(queued.queued_bytes_, after_failure.persistence_failed_bytes_);
+  fs::remove(parent);
+}
+
+TEST(vehicle_eta_calibration, destruction_drains_queued_records) {
+  auto const dir =
+      fs::temp_directory_path() / "motis-eta-calibration-drain-test";
+  fs::remove_all(dir);
+  {
+    auto store = vehicle_eta_calibration{dir};
+    auto value = candidate(1'600);
+    static_cast<void>(store.ingest({&value, 1U}, 1'000, 60));
+    value.batch_.observed_passages_ = {{.static_stop_sequence_ = 4U,
+                                        .observed_timestamp_seconds_ = 1'640,
+                                        .uncertainty_seconds_ = 20}};
+    auto const queued = store.ingest({&value, 1U}, 1'650, 60);
+    ASSERT_EQ(1U, queued.queued_records_);
+  }
+
+  EXPECT_EQ(
+      1U,
+      vehicle_eta_calibration::read_records(dir / "calibration.jsonl").size());
+  fs::remove_all(dir);
 }
 
 }  // namespace

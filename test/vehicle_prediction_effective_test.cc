@@ -72,6 +72,39 @@ TEST(vehicle_prediction_effective, provider_wins_when_gps_is_too_old) {
 }
 
 TEST(vehicle_prediction_effective,
+     unknown_provider_timestamp_does_not_suppress_fresh_gps) {
+  auto const policy = effective_vehicle_prediction_policy{
+      .max_gps_age_seconds_ = 300,
+      .provider_timestamp_tolerance_seconds_ = 60,
+      .min_gps_confidence_ = 0.5};
+  auto provider = candidate(vehicle_prediction_source::kProvider, 1'100);
+  provider.reference_timestamp_known_ = false;
+  auto const input = vehicle_prediction_selection_input{
+      .now_seconds_ = 1'100,
+      .provider_ = std::move(provider),
+      .gps_ = candidate(vehicle_prediction_source::kGps, 1'000, 0.9)};
+
+  EXPECT_EQ(select_effective_vehicle_prediction(input, policy).source_,
+            vehicle_prediction_source::kGps);
+}
+
+TEST(vehicle_prediction_effective,
+     saturates_provider_timestamp_tolerance_at_int64_min) {
+  auto const policy = effective_vehicle_prediction_policy{
+      .max_gps_age_seconds_ = 300,
+      .provider_timestamp_tolerance_seconds_ =
+          std::numeric_limits<std::int64_t>::max(),
+      .min_gps_confidence_ = 0.5};
+  auto const input = vehicle_prediction_selection_input{
+      .now_seconds_ = 1,
+      .provider_ = candidate(vehicle_prediction_source::kProvider, 1),
+      .gps_ = candidate(vehicle_prediction_source::kGps, 0, 0.9)};
+
+  EXPECT_EQ(select_effective_vehicle_prediction(input, policy).source_,
+            vehicle_prediction_source::kGps);
+}
+
+TEST(vehicle_prediction_effective,
      future_dated_provider_does_not_suppress_fresh_gps) {
   auto const policy = effective_vehicle_prediction_policy{};
   auto input = vehicle_prediction_selection_input{

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -15,39 +17,41 @@ class FeedMessage;
 
 namespace motis::vehicle_positions {
 
+inline constexpr std::size_t kMaxVehiclePositionsPerFeed = 20'000U;
+
 struct vehicle_descriptor {
-  std::optional<std::string> id_;
-  std::optional<std::string> label_;
-  std::optional<std::string> license_plate_;
-  std::optional<std::string> wheelchair_accessible_;
+  std::optional<std::string> id_{};
+  std::optional<std::string> label_{};
+  std::optional<std::string> license_plate_{};
+  std::optional<std::string> wheelchair_accessible_{};
 };
 
 struct trip_descriptor {
-  std::optional<std::string> trip_id_;
-  std::optional<std::string> start_date_;
-  std::optional<std::string> start_time_;
-  std::optional<std::string> route_id_;
-  std::optional<std::uint32_t> direction_id_;
-  std::optional<std::string> schedule_relationship_;
+  std::optional<std::string> trip_id_{};
+  std::optional<std::string> start_date_{};
+  std::optional<std::string> start_time_{};
+  std::optional<std::string> route_id_{};
+  std::optional<std::uint32_t> direction_id_{};
+  std::optional<std::string> schedule_relationship_{};
 };
 
 struct reported_position {
-  geo::latlng pos_;
-  std::optional<double> bearing_;
-  std::optional<double> speed_mps_;
+  geo::latlng pos_{};
+  std::optional<double> bearing_{};
+  std::optional<double> speed_mps_{};
 };
 
 struct vehicle_position {
-  std::string feed_id_;
-  std::string entity_id_;
-  vehicle_descriptor vehicle_;
-  trip_descriptor trip_;
-  reported_position reported_position_;
-  std::optional<std::uint32_t> current_stop_sequence_;
-  std::optional<std::string> stop_id_;
-  std::optional<std::string> current_status_;
-  std::optional<std::string> occupancy_status_;
-  std::optional<std::int64_t> reported_time_;
+  std::string feed_id_{};
+  std::string entity_id_{};
+  vehicle_descriptor vehicle_{};
+  trip_descriptor trip_{};
+  reported_position reported_position_{};
+  std::optional<std::uint32_t> current_stop_sequence_{};
+  std::optional<std::string> stop_id_{};
+  std::optional<std::string> current_status_{};
+  std::optional<std::string> occupancy_status_{};
+  std::optional<std::int64_t> reported_time_{};
   std::int64_t ingested_time_{};
 };
 
@@ -87,8 +91,10 @@ struct vehicle_position_store {
   [[nodiscard]] bool empty() const;
 
 private:
+  void bound_feed(std::string_view);
+
   std::vector<vehicle_position> positions_;
-  std::vector<std::pair<std::string, std::string>> missed_full_snapshot_once_;
+  std::set<std::pair<std::string, std::string>> missed_full_snapshot_once_;
 };
 
 }  // namespace motis::vehicle_positions

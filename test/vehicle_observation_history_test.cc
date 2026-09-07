@@ -88,6 +88,23 @@ TEST(vehicle_observation_history,
   EXPECT_EQ(observation_time(values.front()), 110);
 }
 
+TEST(vehicle_observation_history, returns_observations_only_for_matching_trip) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(
+      observation(100, 100, "entity", "vehicle", "current-trip"), kPolicy));
+
+  EXPECT_FALSE(history
+                   .observations(descriptor_key(),
+                                 {.trip_id_ = "current-trip",
+                                  .start_date_ = "20260731"})
+                   .empty());
+  EXPECT_TRUE(history
+                  .observations(descriptor_key(),
+                                {.trip_id_ = "departed-trip",
+                                 .start_date_ = "20260731"})
+                  .empty());
+}
+
 TEST(vehicle_observation_history,
      deduplicates_repeated_reports_without_refreshing_their_age) {
   auto history = vehicle_observation_history{};
@@ -148,6 +165,25 @@ TEST(vehicle_observation_history, can_retain_samples_beyond_freshness_window) {
 
   ASSERT_EQ(history.observations(descriptor_key()).size(), 1U);
   EXPECT_EQ(history.observations(descriptor_key()).front().reported_time_, 100);
+}
+
+TEST(vehicle_observation_history, bounds_active_histories_by_recency) {
+  auto history = vehicle_observation_history{};
+  auto const policy = observation_history_policy{
+      .max_age_ = 900s,
+      .max_observations_per_vehicle_ = 20U,
+      .max_active_histories_ = 2U};
+  EXPECT_TRUE(
+      history.ingest(observation(100, 100, "one", "one"), policy));
+  EXPECT_TRUE(
+      history.ingest(observation(110, 110, "two", "two"), policy));
+  EXPECT_TRUE(
+      history.ingest(observation(120, 120, "three", "three"), policy));
+
+  EXPECT_EQ(history.active_histories(), 2U);
+  EXPECT_TRUE(history.observations(descriptor_key("one")).empty());
+  EXPECT_FALSE(history.observations(descriptor_key("two")).empty());
+  EXPECT_FALSE(history.observations(descriptor_key("three")).empty());
 }
 
 TEST(vehicle_observation_history, resets_when_trip_instance_changes) {

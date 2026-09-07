@@ -42,6 +42,19 @@ TEST(vehicle_eta_control, applies_precedence_and_retains_last_good) {
   EXPECT_TRUE(control.enabled(config));
   EXPECT_EQ(control.resolve(config, "A", nigiri::clasz::kBus), mode::effective);
 
+  write(path, R"({"version":1,"forceOff":false,"feeds":[
+    {"feedId":"A","modes":["AIRPLANE","HIGHSPEED_RAIL","FERRY","AERIAL_LIFT"],"state":"effective"}
+  ]})");
+  EXPECT_TRUE(control.reload());
+  EXPECT_EQ(control.resolve("A", nigiri::clasz::kAir, mode::off),
+            mode::effective);
+  EXPECT_EQ(control.resolve("A", nigiri::clasz::kHighSpeed, mode::off),
+            mode::effective);
+  EXPECT_EQ(control.resolve("A", nigiri::clasz::kShip, mode::off),
+            mode::effective);
+  EXPECT_EQ(control.resolve("A", nigiri::clasz::kAerialLift, mode::off),
+            mode::effective);
+
   write(path, "{invalid");
   EXPECT_FALSE(control.reload());
   EXPECT_EQ(control.resolve("A", nigiri::clasz::kBus, mode::off),

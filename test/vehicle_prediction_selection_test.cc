@@ -1,5 +1,7 @@
 #include "gtest/gtest.h"
 
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -154,6 +156,32 @@ TEST(provider_timing_extraction, resolves_timing_identified_only_by_stop_id) {
   EXPECT_EQ(
       extracted.candidates_.front().stops_.front().departure_timestamp_seconds_,
       20'075);
+}
+
+TEST(provider_timing_extraction,
+     rejects_reference_timestamps_outside_int64) {
+  auto message = transit_realtime::FeedMessage{};
+  message.mutable_header()->set_gtfs_realtime_version("2.0");
+  message.mutable_header()->set_timestamp(
+      std::numeric_limits<std::uint64_t>::max());
+  auto* const update = message.add_entity()->mutable_trip_update();
+  update->mutable_trip()->set_trip_id("trip");
+  update->set_timestamp(std::numeric_limits<std::uint64_t>::max());
+  auto* const timed = update->add_stop_time_update();
+  timed->set_stop_sequence(20U);
+  timed->mutable_departure()->set_delay(75);
+
+  auto const extracted = extract_provider_timing(
+      message, [](transit_realtime::TripDescriptor const&) {
+        return std::optional{resolved_provider_trip{
+            .transport_ = transport(),
+            .stops_ = {{.static_stop_sequence_ = 20U,
+                        .departure_timestamp_seconds_ = 20'000}}}};
+      });
+
+  ASSERT_EQ(extracted.candidates_.size(), 1U);
+  EXPECT_FALSE(extracted.candidates_.front().feed_timestamp_seconds_);
+  EXPECT_FALSE(extracted.candidates_.front().trip_update_timestamp_seconds_);
 }
 
 TEST(provider_timing_extraction, missing_trip_update_is_not_on_time) {

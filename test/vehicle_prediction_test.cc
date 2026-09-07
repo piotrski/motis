@@ -224,6 +224,22 @@ TEST(vehicle_prediction, observation_age_does_not_shift_moving_eta) {
             after_feed_pause.predictions_.front().predicted_timestamp_seconds_);
 }
 
+TEST(vehicle_prediction, clamps_tolerated_future_observation_to_cycle_time) {
+  auto fixture = prediction_fixture{};
+  auto const now = fixture.next_scheduled() - 50;
+  auto prior = fixture.observation(8.004, now + 20);
+  prior.ingested_time_ = now - 10;
+  auto future = fixture.observation(8.005, now + 30);
+  future.ingested_time_ = now;
+  auto const observations = std::vector<vehicle_observation>{prior, future};
+  auto engine = vehicle_prediction_engine{*fixture.data_->shapes_};
+
+  auto const result = engine.evaluate(fixture.run(), observations, now);
+
+  ASSERT_TRUE(result.eligible());
+  EXPECT_EQ(result.candidate_reference_timestamp_seconds_, now);
+}
+
 TEST(vehicle_prediction, finds_shape_for_interlined_trip) {
   auto fixture = prediction_fixture{};
   auto const run = fixture.run("continuation", "01:10");
@@ -255,6 +271,22 @@ TEST(vehicle_prediction, dwell_anchors_delay_without_inventing_motion) {
   EXPECT_EQ(result.delay_anchor_seconds_, 45);
   ASSERT_TRUE(result.confidence_.has_value());
   EXPECT_DOUBLE_EQ(result.confidence_->progress_velocity_mps_, 0.0);
+}
+
+TEST(vehicle_prediction,
+     intermediate_dwell_does_not_predict_departure_before_schedule) {
+  auto fixture = prediction_fixture{};
+  auto const now = fixture.next_scheduled() - 45;
+  auto const observations = std::vector<vehicle_observation>{
+      fixture.observation(8.010, now - 10, 0.0, 20U, "STOPPED_AT"),
+      fixture.observation(8.010, now, 0.0, 20U, "STOPPED_AT")};
+  auto engine = vehicle_prediction_engine{*fixture.data_->shapes_};
+
+  auto const result = engine.evaluate(fixture.run(), observations, now);
+
+  ASSERT_TRUE(result.eligible());
+  EXPECT_EQ(result.delay_anchor_static_stop_sequence_, 20U);
+  EXPECT_EQ(result.delay_anchor_seconds_, 0);
 }
 
 TEST(vehicle_prediction,
@@ -827,6 +859,7 @@ TEST(vehicle_prediction_continuation,
          .event_type_ = event.event_type_,
          .trip_id_ = continuation->trip_id_,
          .trip_stop_range_ = continuation->trip_stop_range_,
+         .mode_ = continuation->mode_,
          .observed_at_seconds_ = reference,
          .scheduled_timestamp_seconds_ = event.scheduled_timestamp_seconds_,
          .gps_ =
@@ -850,6 +883,11 @@ TEST(vehicle_prediction_continuation,
       true, std::move(entries), reference);
   ASSERT_NE(nullptr, store);
 
+  for (auto& entry : store->entries_) {
+    entry.incoming_leg_provenance_->mode_ = n::clasz::kBus;
+    entry.mode_ = n::clasz::kTram;
+  }
+
   auto rejected =
       vehicle_prediction_cycle_result{.trip_id_ = continuation->trip_id_};
   rejected.batch_.transport_ = continuation->transport_;
@@ -860,6 +898,7 @@ TEST(vehicle_prediction_continuation,
   ASSERT_EQ(1U, at_boundary.size());
   EXPECT_EQ(vehicle_prediction_context::kIncomingBlockLeg,
             at_boundary.front().context_);
+  EXPECT_EQ(at_boundary.front().mode_, n::clasz::kTram);
   EXPECT_TRUE(at_boundary.front().batch_.eligible());
 
   auto fresh_incoming = at_boundary.front();
@@ -990,6 +1029,23 @@ TEST(vehicle_prediction_continuation,
   EXPECT_EQ(after[3].time(n::event_type::kArr), prior_leg_time);
   EXPECT_EQ(after[5].time(n::event_type::kArr),
             next_leg_time + std::chrono::minutes{3});
+}
+
+TEST(vehicle_prediction_overlay, bounds_complete_interlined_transports) {
+  auto const first =
+      n::transport{n::transport_idx_t{1U}, n::day_idx_t{1U}};
+  auto const second =
+      n::transport{n::transport_idx_t{2U}, n::day_idx_t{1U}};
+  auto const third =
+      n::transport{n::transport_idx_t{3U}, n::day_idx_t{1U}};
+  auto const candidates = std::array{
+      vehicle_prediction_overlay_size{.transport_ = first, .event_count_ = 3U},
+      vehicle_prediction_overlay_size{.transport_ = second, .event_count_ = 4U},
+      vehicle_prediction_overlay_size{.transport_ = first, .event_count_ = 4U},
+      vehicle_prediction_overlay_size{.transport_ = third, .event_count_ = 2U}};
+
+  EXPECT_EQ(select_complete_vehicle_prediction_overlays(candidates, 6U),
+            (std::vector<n::transport>{second, third}));
 }
 
 TEST(vehicle_prediction_overlay,
@@ -1145,6 +1201,8 @@ TEST(vehicle_prediction_overlay, reports_clamped_early_departure) {
   ASSERT_EQ(state.rendered_events_.size(), 1U);
   EXPECT_EQ(state.rendered_events_.front().effective_timestamp_seconds_,
             scheduled_departure - 60);
+  EXPECT_EQ(state.rendered_events_.front().selected_timestamp_seconds_,
+            scheduled_departure - 60);
   EXPECT_EQ(trip.predictions_.front().predicted_timestamp_seconds_,
             raw_prediction);
 }
@@ -1207,6 +1265,8 @@ TEST(vehicle_prediction_overlay,
   ASSERT_EQ(state.rendered_events_.size(), 1U);
   EXPECT_EQ(state.rendered_events_.front().effective_timestamp_seconds_,
             scheduled_departure);
+  EXPECT_EQ(state.rendered_events_.front().selected_timestamp_seconds_,
+            scheduled_departure - 30);
   EXPECT_EQ(state.rendered_events_.front().delay_minutes_, 0);
 }
 
