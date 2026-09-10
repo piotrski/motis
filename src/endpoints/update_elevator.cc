@@ -2,8 +2,6 @@
 
 #include "net/not_found_exception.h"
 
-#include "nigiri/rt/create_rt_timetable.h"
-
 #include "motis/constants.h"
 #include "motis/elevators/elevators.h"
 #include "motis/elevators/parse_fasta.h"
@@ -48,15 +46,36 @@ json::value update_elevator::operator()(json::value const& query) const {
 
   auto new_e =
       elevators{w_, elevator_ids_, elevator_nodes_, std::move(elevators_copy)};
-  auto new_rtt = n::rt::create_rt_timetable(tt_, rtt->base_day_);
+  auto new_rtt = std::make_unique<n::rt_timetable>(*rtt);
   update_rtt_td_footpaths(
-      w_, l_, pl_, tt_, loc_rtree_, new_e, matches_, tasks, rtt, new_rtt,
+      w_, l_, pl_, tt_, loc_rtree_, new_e, matches_, tasks, rtt, *new_rtt,
+      std::chrono::seconds{c_.timetable_.value().max_footpath_length_ * 60});
+
+  auto const provider_rtt = rt_copy->provider_rtt_ != nullptr
+                                ? rt_copy->provider_rtt_.get()
+                                : rtt;
+  auto new_provider_rtt = std::make_unique<n::rt_timetable>(*provider_rtt);
+  update_rtt_td_footpaths(
+      w_, l_, pl_, tt_, loc_rtree_, new_e, matches_, tasks, provider_rtt,
+      *new_provider_rtt,
       std::chrono::seconds{c_.timetable_.value().max_footpath_length_ * 60});
 
   auto new_rt = std::make_shared<rt>(
-      std::make_unique<n::rt_timetable>(std::move(new_rtt)),
+      std::move(new_rtt), std::move(new_provider_rtt),
       std::make_unique<elevators>(std::move(new_e)),
-      std::move(rt_copy->railviz_rt_));
+      std::move(rt_copy->railviz_rt_),
+      std::make_unique<vehicle_positions::vehicle_position_store>(
+          rt_copy->vehicle_positions_ != nullptr
+              ? *rt_copy->vehicle_positions_
+              : vehicle_positions::vehicle_position_store{}),
+      rt_copy->vehicle_observation_history_ != nullptr
+          ? std::make_unique<vehicle_observation_history>(
+                *rt_copy->vehicle_observation_history_)
+          : nullptr,
+      rt_copy->vehicle_prediction_diagnostics_ != nullptr
+          ? std::make_unique<vehicle_prediction_diagnostics_store>(
+                *rt_copy->vehicle_prediction_diagnostics_)
+          : nullptr);
   std::atomic_store(&rt_, std::move(new_rt));
 
   return json::string{{"success", true}};

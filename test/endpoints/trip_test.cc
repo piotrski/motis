@@ -1,5 +1,7 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
+
 #include "utl/init_from.h"
 
 #include "nigiri/common/parse_time.h"
@@ -12,7 +14,10 @@
 #include "motis/endpoints/trip.h"
 #include "motis/import.h"
 #include "motis/rt/auser.h"
+#include "motis/rt/vehicle_position.h"
+#include "motis/rt/vehicle_prediction_store.h"
 #include "motis/tag_lookup.h"
+#include "motis/timetable/time_conv.h"
 
 using namespace std::string_view_literals;
 using namespace motis;
@@ -82,6 +87,44 @@ function process_route(route)
 end
 )";
 
+constexpr auto kInterlinedGTFS = R"(
+# agency.txt
+agency_id,agency_name,agency_url,agency_timezone
+Test,Test Transit,https://example.com,Europe/Berlin
+
+# stops.txt
+stop_id,stop_name,stop_lat,stop_lon
+A,A,50.0000,8.0000
+B,B,50.0000,8.0100
+C,C,50.0000,8.0200
+D,D,50.0000,8.0300
+
+# routes.txt
+route_id,agency_id,route_short_name,route_type
+R1,Test,1,3
+R2,Test,2,3
+R3,Test,3,3
+
+# trips.txt
+route_id,service_id,trip_id,block_id
+R1,S1,first,three-leg-block
+R2,S1,middle,three-leg-block
+R3,S1,last,three-leg-block
+
+# stop_times.txt
+trip_id,arrival_time,departure_time,stop_id,stop_sequence
+first,10:00:00,10:00:00,A,1
+first,10:10:00,10:10:00,B,2
+middle,10:10:00,10:10:00,B,1
+middle,10:20:00,10:20:00,C,2
+last,10:20:00,10:20:00,C,1
+last,10:30:00,10:30:00,D,2
+
+# calendar_dates.txt
+service_id,date,exception_type
+S1,20190501,1
+)";
+
 TEST(motis, trip_stop_naming) {
   auto ec = std::error_code{};
   std::filesystem::remove_all("test/data", ec);
@@ -97,10 +140,38 @@ TEST(motis, trip_stop_naming) {
   auto d = data{"test/data", c};
 
   auto const trip_ep = utl::init_from<ep::trip>(d).value();
+  auto const without_vehicle = trip_ep("?tripId=20190501_10%3A00_test_T1");
+  ASSERT_EQ(1, without_vehicle.legs_.size());
+  EXPECT_FALSE(without_vehicle.legs_.front().primaryVehicle_.has_value());
+
+  auto const now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+  auto vehicle = vehicle_positions::vehicle_position{
+      .feed_id_ = "test",
+      .entity_id_ = "vehicle-entity",
+      .vehicle_ = {.id_ = "vehicle-1"},
+      .trip_ = {.trip_id_ = "T1",
+                .start_date_ = "20190501",
+                .start_time_ = "10:00:00",
+                .route_id_ = "R1",
+                .direction_id_ = 0U},
+      .reported_position_ = {.pos_ = geo::latlng{50.001, 8.001},
+                             .bearing_ = std::nullopt,
+                             .speed_mps_ = std::nullopt},
+      .current_stop_sequence_ = 1U,
+      .stop_id_ = "Child1A",
+      .reported_time_ = now,
+      .ingested_time_ = now};
+  d.rt_->vehicle_positions_->replace_feed("test", {vehicle});
 
   auto const res = trip_ep("?tripId=20190501_10%3A00_test_T1");
   ASSERT_EQ(1, res.legs_.size());
   auto const& leg = res.legs_[0];
+  ASSERT_TRUE(leg.primaryVehicle_.has_value());
+  EXPECT_EQ(leg.primaryVehicle_->entityId_, "vehicle-entity");
+  EXPECT_EQ(leg.primaryVehicle_->matchState_,
+            api::VehicleMatchStateEnum::MATCHED_TRIP);
   EXPECT_GT(leg.legGeometry_.length_, 0);
   EXPECT_EQ("Child1A", leg.from_.name_);
   ASSERT_TRUE(leg.intermediateStops_.has_value());
@@ -110,6 +181,94 @@ TEST(motis, trip_stop_naming) {
   EXPECT_EQ("Parent2 Express", leg.headsign_);
   EXPECT_EQ("EN_SHORT_NAME", leg.routeShortName_);
   EXPECT_EQ("EN-R1", leg.routeLongName_);
+
+  auto const trip_id = std::string{"20190501_10:00_test_T1"};
+  auto const [resolved, _] =
+      d.tags_->get_trip(*d.tt_, d.rt_->rtt_.get(), trip_id);
+  auto const resolved_run =
+      nigiri::rt::frun{*d.tt_, d.rt_->rtt_.get(), resolved};
+  auto const scheduled_departure =
+      to_seconds(resolved_run[0U].scheduled_time(nigiri::event_type::kDep));
+  d.rt_->vehicle_prediction_diagnostics_ =
+      vehicle_prediction_diagnostics_store::build(
+          true,
+          {{.transport_ = resolved_run.t_,
+            .static_stop_sequence_ = 1U,
+            .event_type_ = vehicle_prediction_event_type::kDeparture,
+            .trip_id_ = trip_id,
+            .observed_at_seconds_ = now,
+            .scheduled_timestamp_seconds_ = scheduled_departure,
+            .gps_ =
+                prediction_candidate_diagnostic{
+                    .source_ = vehicle_prediction_source::kGps,
+                    .predicted_timestamp_seconds_ = scheduled_departure + 120,
+                    .delay_seconds_ = 120,
+                    .confidence_ = 0.8,
+                    .reference_timestamp_seconds_ = now - 15},
+            .effective_ = {.source_ = vehicle_prediction_source::kGps,
+                           .predicted_timestamp_seconds_ =
+                               scheduled_departure + 120,
+                           .delay_seconds_ = 120,
+                           .confidence_ = 0.8,
+                           .reference_timestamp_seconds_ = now - 15},
+            .selected_source_ = vehicle_prediction_source::kGps,
+            .selection_reason_ = vehicle_prediction_selection_reason::kGpsOnly,
+            .context_ = vehicle_prediction_context::kIncomingBlockLeg,
+            .incoming_leg_provenance_ =
+                incoming_leg_prediction_provenance{
+                    .feed_ = "test",
+                    .incoming_trip_id_ = "20190501_09:30_test_incoming",
+                    .next_trip_id_ = trip_id,
+                    .route_id_ = "R1",
+                    .route_short_name_ = "R1",
+                    .headsign_ = "Parent2 Express",
+                    .mode_ = nigiri::clasz::kBus,
+                    .expected_terminal_arrival_seconds_ =
+                        scheduled_departure + 120,
+                    .next_scheduled_departure_seconds_ = scheduled_departure,
+                    .propagated_delay_seconds_ = 120,
+                    .reference_timestamp_seconds_ = now - 15}}},
+          now);
+
+  auto const v6 = trip_ep("/api/v6/trip?tripId=20190501_10%3A00_test_T1");
+  ASSERT_TRUE(v6.startPrediction_.has_value());
+  EXPECT_EQ(api::PredictionSourceEnum::GPS, v6.startPrediction_->source_);
+  EXPECT_EQ(api::PredictionContextEnum::INCOMING_BLOCK_LEG,
+            v6.startPrediction_->context_);
+  ASSERT_TRUE(v6.endPrediction_.has_value());
+  ASSERT_TRUE(v6.intermediateStopEvents_.has_value());
+  ASSERT_EQ(1U, v6.intermediateStopEvents_->size());
+  EXPECT_EQ("Parent1", v6.intermediateStopEvents_->front().place_.name_);
+  EXPECT_TRUE(
+      v6.intermediateStopEvents_->front().arrivalPrediction_.has_value());
+  EXPECT_TRUE(
+      v6.intermediateStopEvents_->front().departurePrediction_.has_value());
+  ASSERT_TRUE(v6.incomingLegPrediction_.has_value());
+  EXPECT_EQ("20190501_09:30_test_incoming",
+            v6.incomingLegPrediction_->incomingTripId_);
+  EXPECT_EQ("R1", v6.incomingLegPrediction_->routeId_);
+  EXPECT_EQ("R1", v6.incomingLegPrediction_->routeShortName_);
+  EXPECT_EQ("Parent2 Express", v6.incomingLegPrediction_->headsign_);
+  EXPECT_EQ(120, v6.incomingLegPrediction_->propagatedDelaySeconds_);
+  EXPECT_EQ(api::PredictionContextEnum::INCOMING_BLOCK_LEG,
+            v6.incomingLegPrediction_->context_);
+
+  auto stale_vehicle = vehicle;
+  stale_vehicle.reported_time_ = now - 10'000;
+  d.rt_->vehicle_positions_->replace_feed("test", {stale_vehicle});
+  auto const stale_res = trip_ep("?tripId=20190501_10%3A00_test_T1");
+  ASSERT_EQ(1, stale_res.legs_.size());
+  EXPECT_FALSE(stale_res.legs_.front().primaryVehicle_.has_value());
+
+  auto missing_reported_time = vehicle;
+  missing_reported_time.reported_time_ = std::nullopt;
+  missing_reported_time.ingested_time_ = now;
+  d.rt_->vehicle_positions_->replace_feed("test", {missing_reported_time});
+  auto const missing_reported_res = trip_ep("?tripId=20190501_10%3A00_test_T1");
+  ASSERT_EQ(1, missing_reported_res.legs_.size());
+  ASSERT_TRUE(missing_reported_res.legs_.front().primaryVehicle_.has_value());
+  EXPECT_EQ(missing_reported_res.legs_.front().primaryVehicle_->entityId_,
+            "vehicle-entity");
 
   auto const compact_res =
       trip_ep("?tripId=20190501_10%3A00_test_T1&detailedLegs=false");
@@ -140,6 +299,212 @@ TEST(motis, trip_stop_naming) {
   EXPECT_EQ("Vers Parent Deux", leg_fr.headsign_);
   EXPECT_EQ("FR_SHORT_NAME", leg_fr.routeShortName_);
   EXPECT_EQ("FR-R1", leg_fr.routeLongName_);
+}
+
+TEST(motis, trip_prediction_events_follow_scheduled_skipped_stop_filter) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/trip-skipped-stop-data", ec);
+  auto gtfs = std::string{kGTFS};
+  auto const scheduled_mid_stop =
+      std::string{"T1,10:10:00,10:10:00,Child1B,2,0,0,Midway"};
+  auto const skipped_mid_stop =
+      std::string{"T1,10:10:00,10:10:00,Child1B,2,1,1,Midway"};
+  auto const pos = gtfs.find(scheduled_mid_stop);
+  ASSERT_NE(pos, std::string::npos);
+  gtfs.replace(pos, scheduled_mid_stop.size(), skipped_mid_stop);
+
+  auto const c = config{
+      .timetable_ = config::timetable{.first_day_ = "2019-05-01",
+                                      .num_days_ = 2,
+                                      .datasets_ = {{"test", {.path_ = gtfs}}}},
+      .street_routing_ = false};
+  import(c, "test/trip-skipped-stop-data");
+  auto d = data{"test/trip-skipped-stop-data", c};
+  auto const endpoint = utl::init_from<ep::trip>(d).value();
+
+  auto const filtered =
+      endpoint("/api/v6/trip?tripId=20190501_10%3A00_test_T1");
+  ASSERT_EQ(filtered.legs_.size(), 1U);
+  ASSERT_TRUE(filtered.legs_.front().intermediateStops_.has_value());
+  EXPECT_TRUE(filtered.legs_.front().intermediateStops_->empty());
+  ASSERT_TRUE(filtered.intermediateStopEvents_.has_value());
+  EXPECT_TRUE(filtered.intermediateStopEvents_->empty());
+
+  auto const included = endpoint(
+      "/api/v6/trip?tripId=20190501_10%3A00_test_T1"
+      "&withScheduledSkippedStops=true");
+  ASSERT_EQ(included.legs_.size(), 1U);
+  ASSERT_TRUE(included.legs_.front().intermediateStops_.has_value());
+  EXPECT_EQ(included.legs_.front().intermediateStops_->size(), 1U);
+  ASSERT_TRUE(included.intermediateStopEvents_.has_value());
+  EXPECT_EQ(included.intermediateStopEvents_->size(), 1U);
+}
+
+TEST(motis, trip_vehicle_matches_requested_interlined_segment) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/trip-interlined-vehicle-data", ec);
+  auto const c =
+      config{.timetable_ =
+                 config::timetable{
+                     .first_day_ = "2019-05-01",
+                     .num_days_ = 2,
+                     .datasets_ = {{"test", {.path_ = kInterlinedGTFS}}}},
+             .street_routing_ = false};
+  import(c, "test/trip-interlined-vehicle-data");
+  auto d = data{"test/trip-interlined-vehicle-data", c};
+  auto const endpoint = utl::init_from<ep::trip>(d).value();
+  auto const now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+  auto const vehicle = [&](std::string entity_id, std::string trip_id,
+                           std::string start_time, std::string route_id,
+                           std::string stop_id, double const longitude) {
+    return vehicle_positions::vehicle_position{
+        .feed_id_ = "test",
+        .entity_id_ = std::move(entity_id),
+        .vehicle_ = {.id_ = std::string{"vehicle-"}.append(trip_id)},
+        .trip_ = {.trip_id_ = std::move(trip_id),
+                  .start_date_ = "20190501",
+                  .start_time_ = std::move(start_time),
+                  .route_id_ = std::move(route_id),
+                  .direction_id_ = 0U},
+        .reported_position_ = {.pos_ = geo::latlng{50.0, longitude}},
+        .current_stop_sequence_ = 1U,
+        .stop_id_ = std::move(stop_id),
+        .reported_time_ = now,
+        .ingested_time_ = now};
+  };
+  d.rt_->vehicle_positions_->replace_feed(
+      "test",
+      {vehicle("first-vehicle", "first", "10:00:00", "R1", "A", 8.0),
+       vehicle("middle-vehicle", "middle", "10:10:00", "R2", "B", 8.01)});
+
+  auto const separate = endpoint(
+      "/api/v6/trip?tripId=20190501_10%3A10_test_middle"
+      "&joinInterlinedLegs=false");
+  ASSERT_EQ(separate.legs_.size(), 3U);
+  auto const middle_leg =
+      std::ranges::find_if(separate.legs_, [](auto const& leg) {
+        return leg.tripId_ == "20190501_10:10_test_middle";
+      });
+  ASSERT_NE(middle_leg, end(separate.legs_));
+  ASSERT_TRUE(middle_leg->primaryVehicle_.has_value());
+  EXPECT_EQ(middle_leg->primaryVehicle_->entityId_, "middle-vehicle");
+  EXPECT_FALSE(separate.legs_.front().primaryVehicle_.has_value());
+
+  auto const joined = endpoint(
+      "/api/v6/trip?tripId=20190501_10%3A10_test_middle"
+      "&joinInterlinedLegs=true");
+  ASSERT_EQ(joined.legs_.size(), 1U);
+  ASSERT_TRUE(joined.legs_.front().primaryVehicle_.has_value());
+  EXPECT_EQ(joined.legs_.front().primaryVehicle_->entityId_, "middle-vehicle");
+}
+
+TEST(motis, trip_prediction_provenance_uses_each_interlined_leg) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/trip-interlined-data", ec);
+
+  auto const c = config{
+      .timetable_ =
+          config::timetable{
+              .first_day_ = "2019-05-01",
+              .num_days_ = 2,
+              .datasets_ = {{"test", {.path_ = kInterlinedGTFS}}}},
+      .street_routing_ = false};
+  import(c, "test/trip-interlined-data");
+  auto d = data{"test/trip-interlined-data", c};
+  auto const trip_ep = utl::init_from<ep::trip>(d).value();
+  auto const first_id = std::string{"20190501_10:00_test_first"};
+  auto const middle_id = std::string{"20190501_10:10_test_middle"};
+  auto const last_id = std::string{"20190501_10:20_test_last"};
+
+  auto const resolve = [&](std::string const& trip_id) {
+    auto const [run, _] =
+        d.tags_->get_trip(*d.tt_, d.rt_->rtt_.get(), trip_id);
+    return nigiri::rt::frun{*d.tt_, d.rt_->rtt_.get(), run};
+  };
+  auto const first = resolve(first_id);
+  auto const middle = resolve(middle_id);
+  auto const last = resolve(last_id);
+  auto const now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+  auto entries = std::vector<vehicle_prediction_diagnostic_entry>{};
+  auto const add_gps = [&](nigiri::rt::frun const& run,
+                           nigiri::stop_idx_t const stop_idx,
+                           nigiri::event_type const event_type,
+                           std::string const& trip_id,
+                           unsigned const stop_sequence,
+                           bool const incoming = false) {
+    auto const scheduled = to_seconds(run[stop_idx].scheduled_time(event_type));
+    auto entry = vehicle_prediction_diagnostic_entry{
+        .transport_ = run.t_,
+        .static_stop_sequence_ = stop_sequence,
+        .event_type_ = event_type == nigiri::event_type::kArr
+                           ? vehicle_prediction_event_type::kArrival
+                           : vehicle_prediction_event_type::kDeparture,
+        .trip_id_ = trip_id,
+        .observed_at_seconds_ = now,
+        .scheduled_timestamp_seconds_ = scheduled,
+        .gps_ = prediction_candidate_diagnostic{
+            .source_ = vehicle_prediction_source::kGps,
+            .predicted_timestamp_seconds_ = scheduled + 60,
+            .delay_seconds_ = 60,
+            .confidence_ = 0.8,
+            .reference_timestamp_seconds_ = now - 15},
+        .effective_ = {.source_ = vehicle_prediction_source::kGps,
+                       .predicted_timestamp_seconds_ = scheduled + 60,
+                       .delay_seconds_ = 60,
+                       .confidence_ = 0.8,
+                       .reference_timestamp_seconds_ = now - 15},
+        .selected_source_ = vehicle_prediction_source::kGps,
+        .selection_reason_ = vehicle_prediction_selection_reason::kGpsOnly};
+    if (incoming) {
+      entry.context_ = vehicle_prediction_context::kIncomingBlockLeg;
+      entry.incoming_leg_provenance_ = incoming_leg_prediction_provenance{
+          .feed_ = "test",
+          .incoming_trip_id_ = first_id,
+          .next_trip_id_ = middle_id,
+          .route_id_ = "R1",
+          .route_short_name_ = "1",
+          .headsign_ = "B",
+          .mode_ = nigiri::clasz::kBus,
+          .expected_terminal_arrival_seconds_ = scheduled + 60,
+          .next_scheduled_departure_seconds_ = scheduled,
+          .propagated_delay_seconds_ = 60,
+          .reference_timestamp_seconds_ = now - 15};
+    }
+    entries.emplace_back(std::move(entry));
+  };
+  add_gps(first, 0U, nigiri::event_type::kDep, first_id, 1U);
+  add_gps(first, 1U, nigiri::event_type::kArr, first_id, 2U);
+  add_gps(middle, 0U, nigiri::event_type::kDep, middle_id, 1U, true);
+  add_gps(middle, 1U, nigiri::event_type::kArr, middle_id, 2U);
+  add_gps(last, 0U, nigiri::event_type::kDep, last_id, 1U);
+  add_gps(last, 1U, nigiri::event_type::kArr, last_id, 2U);
+  d.rt_->vehicle_prediction_diagnostics_ =
+      vehicle_prediction_diagnostics_store::build(true, std::move(entries),
+                                                  now);
+
+  auto const res = trip_ep(
+      "/api/v6/trip?tripId=20190501_10%3A10_test_middle");
+
+  ASSERT_TRUE(res.startPrediction_.has_value());
+  EXPECT_EQ(api::PredictionSourceEnum::GPS, res.startPrediction_->source_);
+  ASSERT_TRUE(res.endPrediction_.has_value());
+  EXPECT_EQ(api::PredictionSourceEnum::GPS, res.endPrediction_->source_);
+  ASSERT_TRUE(res.intermediateStopEvents_.has_value());
+  ASSERT_EQ(2U, res.intermediateStopEvents_->size());
+  for (auto const& event : *res.intermediateStopEvents_) {
+    ASSERT_TRUE(event.arrivalPrediction_.has_value());
+    EXPECT_EQ(api::PredictionSourceEnum::GPS,
+              event.arrivalPrediction_->source_);
+    ASSERT_TRUE(event.departurePrediction_.has_value());
+    EXPECT_EQ(api::PredictionSourceEnum::GPS,
+              event.departurePrediction_->source_);
+  }
+  ASSERT_TRUE(res.incomingLegPrediction_.has_value());
+  EXPECT_EQ(middle_id, res.incomingLegPrediction_->nextTripId_);
 }
 
 constexpr auto kNetex = R"(

@@ -18,6 +18,7 @@
 
 #include "utl/init_from.h"
 
+#include "nigiri/rt/frun.h"
 #include "nigiri/rt/gtfsrt_update.h"
 
 #include "motis-api/motis-api.h"
@@ -28,6 +29,8 @@
 #include "motis/endpoints/routing.h"
 #include "motis/gbfs/update.h"
 #include "motis/import.h"
+#include "motis/tag_lookup.h"
+#include "motis/timetable/time_conv.h"
 
 #include "../util.h"
 
@@ -178,6 +181,193 @@ TEST(motis, stop_times) {
               format_time(sbahn.place_.scheduledArrival_.value()));
     EXPECT_EQ(false, sbahn.realTime_);
     EXPECT_EQ(2, sbahn.previousStops_->size());
+    EXPECT_FALSE(res.predictionDebug_.has_value());
+    for (auto const& stop_time : res.stopTimes_) {
+      EXPECT_FALSE(stop_time.selectedPrediction_.has_value());
+    }
+
+    auto const [ice_run, _] =
+        d.tags_->get_trip(*d.tt_, d.rt_->rtt_.get(), ice.tripId_);
+    auto const ice_frun = n::rt::frun{*d.tt_, d.rt_->rtt_.get(), ice_run};
+    auto const scheduled =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            static_cast<std::chrono::sys_seconds>(*ice.place_.scheduledArrival_)
+                .time_since_epoch())
+            .count();
+    d.rt_->vehicle_prediction_diagnostics_ =
+        vehicle_prediction_diagnostics_store::build(
+            true,
+            {{.transport_ = ice_frun.t_,
+              .static_stop_sequence_ = 1U,
+              .trip_id_ = ice.tripId_,
+              .observed_at_seconds_ = scheduled,
+              .scheduled_timestamp_seconds_ = scheduled,
+              .provider_ =
+                  prediction_candidate_diagnostic{
+                      .source_ = vehicle_prediction_source::kProvider,
+                      .predicted_timestamp_seconds_ = scheduled + 600,
+                      .delay_seconds_ = 600},
+              .gps_ =
+                  prediction_candidate_diagnostic{
+                      .source_ = vehicle_prediction_source::kGps,
+                      .predicted_timestamp_seconds_ = scheduled + 420,
+                      .delay_seconds_ = 420,
+                      .confidence_ = 0.8},
+              .effective_ = {.source_ = vehicle_prediction_source::kProvider,
+                             .predicted_timestamp_seconds_ = scheduled + 600,
+                             .delay_seconds_ = 600},
+              .selected_source_ = vehicle_prediction_source::kGps,
+              .selection_reason_ = vehicle_prediction_selection_reason::
+                  kProviderProgressInconsistent,
+              .latest_vehicle_observation_timestamp_seconds_ = scheduled - 15,
+              .context_ = vehicle_prediction_context::kIncomingBlockLeg}},
+            scheduled);
+
+    auto const debug_res = stop_times(
+        "/api/v5/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T23:30:00.000Z"
+        "&arriveBy=true"
+        "&n=3"
+        "&includePredictionComparison=true");
+    ASSERT_TRUE(debug_res.predictionDebug_.has_value());
+    ASSERT_EQ(1U, debug_res.predictionDebug_->size());
+    auto const& debug = debug_res.predictionDebug_->front();
+    EXPECT_EQ(0, debug.stopTimeIndex_);
+    EXPECT_EQ(ice.tripId_, debug.tripId_);
+    EXPECT_EQ(420, debug.gps_->delaySeconds_);
+    EXPECT_EQ(600, debug.effective_.delaySeconds_);
+    EXPECT_EQ(api::PredictionSourceEnum::GPS, debug.selectedSource_);
+    EXPECT_EQ(api::PredictionContextEnum::INCOMING_BLOCK_LEG, debug.context_);
+    EXPECT_EQ(scheduled - 15, debug.latestVehicleObservationTime_);
+
+    d.rt_->vehicle_prediction_diagnostics_->entries_.front().effective_ = {
+        .source_ = vehicle_prediction_source::kGps,
+        .predicted_timestamp_seconds_ = scheduled + 421,
+        .delay_seconds_ = 421,
+        .confidence_ = 0.8,
+        .reference_timestamp_seconds_ = scheduled - 30};
+    auto const v6 = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T23:30:00.000Z"
+        "&arriveBy=true&n=3");
+    ASSERT_EQ(3U, v6.stopTimes_.size());
+    ASSERT_TRUE(v6.stopTimes_.front().selectedPrediction_.has_value());
+    EXPECT_EQ(api::PredictionSourceEnum::GPS,
+              v6.stopTimes_.front().selectedPrediction_->source_);
+    EXPECT_EQ(421, v6.stopTimes_.front().selectedPrediction_->delaySeconds_);
+    EXPECT_TRUE(
+        v6.stopTimes_.front().selectedPrediction_->time_.ends_with(":52:01Z"));
+    EXPECT_FALSE(v6.nextPageCursor_.contains('|'));
+    auto const v6_next = stop_times(fmt::format(
+        "/api/v6/stoptimes?stopId=test_FFM_10&arriveBy=true&n=3&pageCursor={}",
+        v6.nextPageCursor_));
+    EXPECT_TRUE(std::ranges::none_of(v6_next.stopTimes_, [&](auto const& x) {
+      return x.tripId_ == v6.stopTimes_.back().tripId_;
+    }));
+    EXPECT_THROW(
+        stop_times(
+            "/api/v6/stoptimes?stopId=test_FFM_10&n=1&pageCursor="
+            "eyJ2IjoxLCJkIjoiTCIsInQiOi05MjIzMzcyMDM2ODU0Nzc1ODA4LCJpIjoieCJ9"),
+        net::bad_request_exception);
+    EXPECT_THROW(
+        stop_times(
+            "/api/v6/stoptimes?stopId=test_FFM_10&n=1&pageCursor="
+            "eyJ2IjoxLCJkIjoiRSIsInQiOjkyMjMzNzIwMzY4NTQ3NzU4MDcsImkiOiJ4In0"),
+        net::bad_request_exception);
+    EXPECT_THROW(
+        stop_times(
+            "/api/v6/stoptimes?stopId=test_FFM_10&direction=LATER"
+            "&time=2019-04-30T23:30:00.000Z&window=9223372036854775807"),
+        net::bad_request_exception);
+
+    d.rt_->vehicle_prediction_diagnostics_ =
+        vehicle_prediction_diagnostics_store::build(
+            true,
+            {{.transport_ = ice_frun.t_,
+              .static_stop_sequence_ = 1U,
+              .trip_id_ = ice.tripId_,
+              .observed_at_seconds_ = scheduled,
+              .scheduled_timestamp_seconds_ = scheduled,
+              .effective_ = {.source_ = vehicle_prediction_source::kSchedule,
+                             .predicted_timestamp_seconds_ = scheduled,
+                             .delay_seconds_ = 0},
+              .gps_estimation_rejection_ =
+                  vehicle_prediction_rejection_reason::kInsufficientHistory}},
+            scheduled);
+
+    auto const rejected_res = stop_times(
+        "/api/v5/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T23:30:00.000Z"
+        "&arriveBy=true"
+        "&n=3"
+        "&includePredictionComparison=true");
+    ASSERT_TRUE(rejected_res.predictionDebug_.has_value());
+    ASSERT_EQ(1U, rejected_res.predictionDebug_->size());
+    auto const& rejected_debug = rejected_res.predictionDebug_->front();
+    EXPECT_FALSE(rejected_debug.gps_.has_value());
+    EXPECT_EQ(api::GpsEstimationRejectionReasonEnum::INSUFFICIENT_HISTORY,
+              rejected_debug.gpsEstimationRejection_);
+
+    auto const provider_fallback = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T23:30:00.000Z"
+        "&arriveBy=true&n=3");
+    ASSERT_TRUE(
+        provider_fallback.stopTimes_.front().selectedPrediction_.has_value());
+    auto const& selected =
+        *provider_fallback.stopTimes_.front().selectedPrediction_;
+    EXPECT_EQ(api::PredictionSourceEnum::PROVIDER, selected.source_);
+    EXPECT_EQ(600, selected.delaySeconds_);
+    EXPECT_TRUE(selected.time_.ends_with(":55:00Z"));
+
+    auto const first_page = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T22:54:00.000Z&arriveBy=true&direction=LATER&n=1");
+    ASSERT_EQ(1U, first_page.stopTimes_.size());
+    EXPECT_EQ(ice.tripId_, first_page.stopTimes_.front().tripId_);
+    auto const second_page = stop_times(fmt::format(
+        "/api/v6/stoptimes?stopId=test_FFM_10&arriveBy=true&n=1&pageCursor={}",
+        first_page.nextPageCursor_));
+    ASSERT_EQ(1U, second_page.stopTimes_.size());
+    EXPECT_NE(ice.tripId_, second_page.stopTimes_.front().tripId_);
+
+    d.rt_->vehicle_prediction_diagnostics_ =
+        vehicle_prediction_diagnostics_store::build(
+            true,
+            {{.transport_ = ice_frun.t_,
+              .static_stop_sequence_ = 1U,
+              .event_type_ = vehicle_prediction_event_type::kArrival,
+              .trip_id_ = ice.tripId_,
+              .observed_at_seconds_ = scheduled,
+              .scheduled_timestamp_seconds_ = scheduled,
+              .effective_ = {.source_ = vehicle_prediction_source::kGps,
+                             .predicted_timestamp_seconds_ = scheduled + 625,
+                             .delay_seconds_ = 625},
+              .selected_source_ = vehicle_prediction_source::kGps,
+              .selection_reason_ =
+                  vehicle_prediction_selection_reason::kGpsOnly}},
+            scheduled);
+    auto const exact_boundary = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T22:55:20.000Z&arriveBy=true&direction=LATER&n=1");
+    ASSERT_EQ(1U, exact_boundary.stopTimes_.size());
+    EXPECT_EQ(ice.tripId_, exact_boundary.stopTimes_.front().tripId_);
+
+    auto const exact_window = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T22:55:20.000Z&arriveBy=true&direction=LATER"
+        "&window=30");
+    ASSERT_EQ(1U, exact_window.stopTimes_.size());
+    EXPECT_EQ(ice.tripId_, exact_window.stopTimes_.front().tripId_);
+
+    auto const outside_exact_window = stop_times(
+        "/api/v6/stoptimes?stopId=test_FFM_10"
+        "&time=2019-04-30T22:55:00.000Z&arriveBy=true&direction=LATER"
+        "&window=20");
+    EXPECT_TRUE(std::ranges::none_of(outside_exact_window.stopTimes_,
+                                     [&](auto const& stop_time) {
+                                       return stop_time.tripId_ == ice.tripId_;
+                                     }));
   }
 
   {

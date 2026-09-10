@@ -1,7 +1,14 @@
 #include "motis/endpoints/stop_times.h"
 
 #include <algorithm>
+#include <array>
+#include <functional>
+#include <limits>
 #include <memory>
+#include <set>
+
+#include "boost/json.hpp"
+#include "date/date.h"
 
 #include "utl/concat.h"
 #include "utl/enumerate.h"
@@ -33,6 +40,259 @@
 namespace n = nigiri;
 
 namespace motis::ep {
+
+namespace {
+
+struct exact_cursor {
+  n::direction direction_{n::direction::kForward};
+  std::int64_t selected_seconds_{};
+  std::string identity_;
+};
+
+std::string base64url_encode(std::string_view const input) {
+  constexpr auto alphabet = std::string_view{
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"};
+  auto output = std::string{};
+  output.reserve((input.size() * 4U + 2U) / 3U);
+  auto accumulator = 0U;
+  auto bits = 0U;
+  for (auto const byte : input) {
+    accumulator = (accumulator << 8U) | static_cast<unsigned char>(byte);
+    bits += 8U;
+    while (bits >= 6U) {
+      bits -= 6U;
+      output.push_back(alphabet[(accumulator >> bits) & 0x3FU]);
+    }
+  }
+  if (bits != 0U) {
+    output.push_back(alphabet[(accumulator << (6U - bits)) & 0x3FU]);
+  }
+  return output;
+}
+
+std::optional<std::string> base64url_decode(std::string_view const input) {
+  auto output = std::string{};
+  auto accumulator = 0U;
+  auto bits = 0U;
+  for (auto const byte : input) {
+    auto const value =
+        byte >= 'A' && byte <= 'Z'   ? static_cast<int>(byte - 'A')
+        : byte >= 'a' && byte <= 'z' ? static_cast<int>(byte - 'a' + 26)
+        : byte >= '0' && byte <= '9' ? static_cast<int>(byte - '0' + 52)
+        : byte == '-'                ? 62
+        : byte == '_'                ? 63
+                                     : -1;
+    if (value < 0) {
+      return std::nullopt;
+    }
+    accumulator = (accumulator << 6U) | static_cast<unsigned>(value);
+    bits += 6U;
+    if (bits >= 8U) {
+      bits -= 8U;
+      output.push_back(static_cast<char>((accumulator >> bits) & 0xFFU));
+    }
+  }
+  return output;
+}
+
+std::string encode_cursor(exact_cursor const& cursor) {
+  return base64url_encode(boost::json::serialize(boost::json::object{
+      {"v", 1},
+      {"d", cursor.direction_ == n::direction::kForward ? "L" : "E"},
+      {"t", cursor.selected_seconds_},
+      {"i", cursor.identity_}}));
+}
+
+std::optional<exact_cursor> decode_cursor(std::string_view const encoded) {
+  try {
+    auto const decoded = base64url_decode(encoded);
+    if (!decoded.has_value()) {
+      return std::nullopt;
+    }
+    auto const object = boost::json::parse(*decoded).as_object();
+    if (object.at("v").as_int64() != 1) {
+      return std::nullopt;
+    }
+    return exact_cursor{.direction_ = object.at("d").as_string() == "L"
+                                          ? n::direction::kForward
+                                          : n::direction::kBackward,
+                        .selected_seconds_ = object.at("t").as_int64(),
+                        .identity_ = object.at("i").as_string().c_str()};
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+api::PredictionSourceEnum to_api(vehicle_prediction_source const source) {
+  switch (source) {
+    case vehicle_prediction_source::kProvider:
+      return api::PredictionSourceEnum::PROVIDER;
+    case vehicle_prediction_source::kGps: return api::PredictionSourceEnum::GPS;
+    case vehicle_prediction_source::kSchedule:
+      return api::PredictionSourceEnum::SCHEDULE;
+  }
+  std::unreachable();
+}
+
+api::PredictionSelectionReasonEnum to_api(
+    vehicle_prediction_selection_reason const reason) {
+  switch (reason) {
+    case vehicle_prediction_selection_reason::kProviderOnly:
+      return api::PredictionSelectionReasonEnum::PROVIDER_ONLY;
+    case vehicle_prediction_selection_reason::kGpsOnly:
+      return api::PredictionSelectionReasonEnum::GPS_ONLY;
+    case vehicle_prediction_selection_reason::kProviderHigherConfidence:
+      return api::PredictionSelectionReasonEnum::PROVIDER_HIGHER_CONFIDENCE;
+    case vehicle_prediction_selection_reason::kGpsHigherConfidence:
+      return api::PredictionSelectionReasonEnum::GPS_HIGHER_CONFIDENCE;
+    case vehicle_prediction_selection_reason::kProviderProgressInconsistent:
+      return api::PredictionSelectionReasonEnum::PROVIDER_PROGRESS_INCONSISTENT;
+    case vehicle_prediction_selection_reason::kProviderRecoveryPending:
+      return api::PredictionSelectionReasonEnum::PROVIDER_RECOVERY_PENDING;
+    case vehicle_prediction_selection_reason::kProviderRecovered:
+      return api::PredictionSelectionReasonEnum::PROVIDER_RECOVERED;
+    case vehicle_prediction_selection_reason::kSourceHysteresis:
+      return api::PredictionSelectionReasonEnum::SOURCE_HYSTERESIS;
+    case vehicle_prediction_selection_reason::kNoUsableCandidate:
+      return api::PredictionSelectionReasonEnum::NO_USABLE_CANDIDATE;
+    case vehicle_prediction_selection_reason::kPolicyUnavailable:
+      return api::PredictionSelectionReasonEnum::POLICY_UNAVAILABLE;
+  }
+  std::unreachable();
+}
+
+api::PredictionRejectionReasonEnum to_api(
+    timing_candidate_rejection_reason const reason) {
+  switch (reason) {
+    case timing_candidate_rejection_reason::kStale:
+      return api::PredictionRejectionReasonEnum::STALE;
+    case timing_candidate_rejection_reason::kLowConfidence:
+      return api::PredictionRejectionReasonEnum::LOW_CONFIDENCE;
+    case timing_candidate_rejection_reason::kPhysicallyUnreachable:
+      return api::PredictionRejectionReasonEnum::PHYSICALLY_UNREACHABLE;
+    case timing_candidate_rejection_reason::kTimestampNotComparable:
+      return api::PredictionRejectionReasonEnum::TIMESTAMP_NOT_COMPARABLE;
+    case timing_candidate_rejection_reason::kProgressNotComparable:
+      return api::PredictionRejectionReasonEnum::PROGRESS_NOT_COMPARABLE;
+    case timing_candidate_rejection_reason::kProgressInconsistent:
+      return api::PredictionRejectionReasonEnum::PROGRESS_INCONSISTENT;
+  }
+  std::unreachable();
+}
+
+api::GpsEstimationRejectionReasonEnum to_api(
+    vehicle_prediction_rejection_reason const reason) {
+  using api_reason = api::GpsEstimationRejectionReasonEnum;
+  switch (reason) {
+    case vehicle_prediction_rejection_reason::kMissingTripId:
+      return api_reason::MISSING_TRIP_ID;
+    case vehicle_prediction_rejection_reason::kUnresolvedTrip:
+      return api_reason::UNRESOLVED_TRIP;
+    case vehicle_prediction_rejection_reason::kUnscheduledTrip:
+      return api_reason::UNSCHEDULED_TRIP;
+    case vehicle_prediction_rejection_reason::kUnsupportedTripRelationship:
+      return api_reason::UNSUPPORTED_TRIP_RELATIONSHIP;
+    case vehicle_prediction_rejection_reason::kInsufficientHistory:
+      return api_reason::INSUFFICIENT_HISTORY;
+    case vehicle_prediction_rejection_reason::kStaleHistory:
+      return api_reason::STALE_HISTORY;
+    case vehicle_prediction_rejection_reason::kMissingShape:
+      return api_reason::MISSING_SHAPE;
+    case vehicle_prediction_rejection_reason::kOffShape:
+      return api_reason::OFF_SHAPE;
+    case vehicle_prediction_rejection_reason::kAmbiguousProgress:
+      return api_reason::AMBIGUOUS_PROGRESS;
+    case vehicle_prediction_rejection_reason::kNonMonotonicProgress:
+      return api_reason::NON_MONOTONIC_PROGRESS;
+    case vehicle_prediction_rejection_reason::kInvalidObservationTime:
+      return api_reason::INVALID_OBSERVATION_TIME;
+    case vehicle_prediction_rejection_reason::kImpossibleSpeed:
+      return api_reason::IMPOSSIBLE_SPEED;
+    case vehicle_prediction_rejection_reason::kImpossibleTravelTime:
+      return api_reason::IMPOSSIBLE_TRAVEL_TIME;
+    case vehicle_prediction_rejection_reason::kTerminal:
+      return api_reason::TERMINAL;
+  }
+  std::unreachable();
+}
+
+api::PredictionCandidate to_api(
+    prediction_candidate_diagnostic const& candidate) {
+  return {.source_ = to_api(candidate.source_),
+          .time_ = candidate.predicted_timestamp_seconds_,
+          .delaySeconds_ = candidate.delay_seconds_,
+          .confidence_ = candidate.confidence_,
+          .referenceTime_ = candidate.reference_timestamp_seconds_};
+}
+
+std::string rfc3339(std::int64_t const timestamp_seconds) {
+  return date::format("%FT%TZ", std::chrono::sys_seconds{
+                                    std::chrono::seconds{timestamp_seconds}});
+}
+
+api::SelectedPrediction selected_prediction(
+    n::rt::run const& run,
+    n::rt::run_stop const& stop,
+    n::event_type const event_type,
+    vehicle_prediction_diagnostic_entry const* const diagnostic) {
+  auto const scheduled = to_seconds(stop.scheduled_time(event_type));
+  auto const selected = resolve_effective_prediction(
+      run.is_rt(), scheduled, to_seconds(stop.time(event_type)), diagnostic);
+  return {
+      .source_ = to_api(selected.source_),
+      .time_ = rfc3339(selected.predicted_timestamp_seconds_),
+      .scheduledTime_ = rfc3339(scheduled),
+      .delaySeconds_ = selected.delay_seconds_,
+      .confidence_ = selected.confidence_,
+      .referenceTime_ = selected.reference_timestamp_seconds_.transform(
+          [](auto const timestamp) { return rfc3339(timestamp); }),
+      .eventType_ = event_type == n::event_type::kArr
+                        ? api::PredictionEventTypeEnum::ARRIVAL
+                        : api::PredictionEventTypeEnum::DEPARTURE,
+      .context_ =
+          diagnostic != nullptr &&
+                  diagnostic->context_ ==
+                      vehicle_prediction_context::kIncomingBlockLeg
+              ? std::optional{api::PredictionContextEnum::INCOMING_BLOCK_LEG}
+              : std::nullopt};
+}
+
+api::PredictionDebug to_api(vehicle_prediction_diagnostic_entry const& entry,
+                            std::size_t const stop_time_index) {
+  return {
+      .stopTimeIndex_ = static_cast<std::int64_t>(stop_time_index),
+      .tripId_ = entry.trip_id_,
+      .stopSequence_ = static_cast<std::int64_t>(entry.static_stop_sequence_),
+      .selectedSource_ = to_api(entry.selected_source_),
+      .selectionReason_ = to_api(entry.selection_reason_),
+      .provider_ =
+          entry.provider_.transform([](auto const& x) { return to_api(x); }),
+      .gps_ = entry.gps_.transform([](auto const& x) { return to_api(x); }),
+      .effective_ = to_api(entry.effective_),
+      .selectedConfidence_ = entry.selected_confidence_,
+      .providerRejection_ = entry.provider_rejection_.transform(
+          [](auto const x) { return to_api(x); }),
+      .gpsRejection_ = entry.gps_rejection_.transform(
+          [](auto const x) { return to_api(x); }),
+      .gpsEstimationRejection_ = entry.gps_estimation_rejection_.transform(
+          [](auto const x) { return to_api(x); }),
+      .context_ =
+          entry.context_ == vehicle_prediction_context::kIncomingBlockLeg
+              ? std::optional{api::PredictionContextEnum::INCOMING_BLOCK_LEG}
+              : std::nullopt,
+      .latestVehicleObservationTime_ =
+          entry.latest_vehicle_observation_timestamp_seconds_,
+      .candidateTimestampSkewSeconds_ = entry.candidate_timestamp_skew_seconds_,
+      .projectionErrorMeters_ = entry.projection_error_m_,
+      .progressDifferenceMeters_ = entry.progress_difference_m_,
+      .sourceTransition_ = entry.source_transition_,
+      .providerRecovery_ = entry.provider_recovery_,
+      .flap_ = entry.flap_,
+      .providerConsistentCycles_ =
+          static_cast<std::int64_t>(entry.provider_consistent_cycles_)};
+}
+
+}  // namespace
 
 struct ev_iterator {
   ev_iterator() = default;
@@ -204,7 +464,10 @@ std::vector<n::rt::run> get_events(
     std::size_t const max_count,
     n::routing::clasz_mask_t const allowed_clasz,
     bool const with_scheduled_skipped_stops,
-    std::optional<n::duration_t> const max_time_diff) {
+    std::optional<std::int64_t> const max_time_diff_seconds,
+    std::int64_t const window_origin_seconds,
+    std::int64_t const window_margin_seconds,
+    std::function<bool(n::rt::run const&)> const& include_event) {
   auto iterators = std::vector<std::unique_ptr<ev_iterator>>{};
 
   if (rtt != nullptr) {
@@ -284,15 +547,26 @@ std::vector<n::rt::run> get_events(
         });
     assert(!(*it)->finished());
     auto const current_time = (*it)->time();
-    if ((!max_time_diff.has_value() ||
-         std::chrono::abs(current_time - time) > *max_time_diff) &&
+    auto const current_seconds = to_seconds(current_time);
+    auto const past_window =
+        max_time_diff_seconds.has_value() &&
+        (fwd ? current_seconds > window_origin_seconds +
+                                     *max_time_diff_seconds +
+                                     window_margin_seconds
+             : current_seconds < window_origin_seconds -
+                                     *max_time_diff_seconds -
+                                     window_margin_seconds);
+    if ((!max_time_diff_seconds.has_value() || past_window) &&
         (evs.size() >= min_count && current_time != last_time)) {
       break;
     }
-    evs.emplace_back((*it)->get());
-    utl::verify<net::too_many_exception>(
-        evs.size() <= max_count,
-        "requesting for more than {} datapoints is not allowed", max_count);
+    auto const event = (*it)->get();
+    if (include_event(event)) {
+      evs.emplace_back(event);
+      utl::verify<net::too_many_exception>(
+          evs.size() <= max_count,
+          "requesting for more than {} datapoints is not allowed", max_count);
+    }
     last_time = current_time;
     (*it)->increment();
   }
@@ -401,16 +675,48 @@ api::stoptimes_response stop_times::operator()(
       query_stop.has_value(), query_center.has_value());
 
   auto const allowed_clasz = to_clasz_mask(query.mode_);
-  auto const [dir, time] = parse_cursor(query.pageCursor_.value_or(fmt::format(
-      "{}|{}",
+  auto const decoded_cursor = api_version >= 6 && query.pageCursor_.has_value()
+                                  ? decode_cursor(*query.pageCursor_)
+                                  : std::nullopt;
+  if (api_version >= 6 && query.pageCursor_.has_value()) {
+    utl::verify<net::bad_request_exception>(decoded_cursor.has_value(),
+                                            "invalid v6 page cursor");
+  }
+  auto const default_direction =
       query.direction_
           .transform([](auto&& x) {
             return x == api::directionEnum::EARLIER ? "EARLIER" : "LATER";
           })
-          .value_or(query.arriveBy_ ? "EARLIER" : "LATER"),
+          .value_or(query.arriveBy_ ? "EARLIER" : "LATER");
+  auto const default_seconds =
       std::chrono::duration_cast<std::chrono::seconds>(
           query.time_.value_or(openapi::now())->time_since_epoch())
-          .count())));
+          .count();
+  auto const cursor_direction = decoded_cursor.has_value()
+                                    ? decoded_cursor->direction_
+                                : std::string_view{default_direction} == "LATER"
+                                    ? n::direction::kForward
+                                    : n::direction::kBackward;
+  auto const boundary_seconds = decoded_cursor.has_value()
+                                    ? decoded_cursor->selected_seconds_
+                                    : default_seconds;
+  if (decoded_cursor.has_value()) {
+    auto const cursor_in_range =
+        cursor_direction == n::direction::kForward
+            ? boundary_seconds >= std::numeric_limits<std::int64_t>::min() + 60
+            : boundary_seconds <= std::numeric_limits<std::int64_t>::max() - 60;
+    utl::verify<net::bad_request_exception>(cursor_in_range,
+                                            "invalid v6 page cursor timestamp");
+  }
+  auto const collection_seconds =
+      api_version >= 6
+          ? boundary_seconds +
+                (cursor_direction == n::direction::kForward ? -60 : 60)
+          : boundary_seconds;
+  auto const collection_cursor = fmt::format(
+      "{}|{}", cursor_direction == n::direction::kForward ? "LATER" : "EARLIER",
+      collection_seconds);
+  auto const [dir, time] = parse_cursor(collection_cursor);
 
   auto locations = std::vector<n::location_idx_t>{};
   auto const add_descendants = [&](n::location_idx_t const root) {
@@ -469,13 +775,86 @@ api::stoptimes_response stop_times::operator()(
                         matches_, ae_, tz_, query.language_, tt_location{l})
             .stopId_;
       });
-  auto const window = query.window_.transform([](auto const w) {
-    return std::chrono::duration_cast<n::duration_t>(std::chrono::seconds{w});
-  });
+  auto const window = query.window_.transform(
+      [](auto const w) { return static_cast<std::int64_t>(w); });
+  auto const window_origin_seconds =
+      api_version >= 6 ? boundary_seconds : to_seconds(time);
+  if (window.has_value()) {
+    auto const margin = api_version >= 6 ? std::int64_t{60} : 0;
+    auto const span_safe =
+        *window >= 0 &&
+        *window <= std::numeric_limits<std::int64_t>::max() - margin;
+    auto const bounds_safe =
+        span_safe &&
+        (cursor_direction == n::direction::kForward
+             ? window_origin_seconds <=
+                   std::numeric_limits<std::int64_t>::max() - *window - margin
+             : window_origin_seconds >=
+                   std::numeric_limits<std::int64_t>::min() + *window + margin);
+    utl::verify<net::bad_request_exception>(bounds_safe,
+                                            "invalid stoptimes window");
+  }
+  auto const exact_key = [&](n::rt::run const& run) {
+    auto const fr = n::rt::frun{tt_, rtt, run};
+    auto const stop = fr[0];
+    auto const trip_id = tags_.id(tt_, stop, ev_type);
+    auto const scheduled = to_seconds(stop.scheduled_time(ev_type));
+    auto const sequence = static_stop_sequence(
+        tt_, fr.t_.t_idx_, stop.get_trip_idx(ev_type), stop.stop_idx_);
+    auto const* diagnostic =
+        rt->vehicle_prediction_diagnostics_ == nullptr || !sequence.has_value()
+            ? nullptr
+            : rt->vehicle_prediction_diagnostics_->find_event(
+                  fr.t_, trip_id, *sequence, scheduled,
+                  ev_type == n::event_type::kArr
+                      ? vehicle_prediction_event_type::kArrival
+                      : vehicle_prediction_event_type::kDeparture);
+    auto const selected = resolve_effective_prediction(
+        run.is_rt(), scheduled, to_seconds(stop.time(ev_type)), diagnostic);
+    return std::tuple{selected.predicted_timestamp_seconds_, trip_id, scheduled,
+                      static_cast<unsigned>(fr.stop_range_.from_),
+                      static_cast<unsigned>(ev_type)};
+  };
+  auto const cursor_key = [&](n::rt::run const& run) {
+    auto const key = exact_key(run);
+    return std::pair{
+        std::get<0>(key),
+        fmt::format("{}|{}|{}|{}", std::get<1>(key), std::get<2>(key),
+                    std::get<3>(key), std::get<4>(key))};
+  };
+  auto seen_exact_keys =
+      std::set<std::tuple<std::int64_t, std::string, std::int64_t, unsigned,
+                          unsigned>>{};
+  auto const include_event = [&](n::rt::run const& run) {
+    if (api_version < 6) {
+      return true;
+    }
+    auto const key = cursor_key(run);
+    if (decoded_cursor.has_value()) {
+      auto const boundary = std::pair{decoded_cursor->selected_seconds_,
+                                      decoded_cursor->identity_};
+      if (cursor_direction == n::direction::kForward ? key <= boundary
+                                                     : key >= boundary) {
+        return false;
+      }
+    } else if (cursor_direction == n::direction::kForward
+                   ? key.first < boundary_seconds
+                   : key.first > boundary_seconds) {
+      return false;
+    }
+    if (window.has_value() && (cursor_direction == n::direction::kForward
+                                   ? key.first > boundary_seconds + *window
+                                   : key.first < boundary_seconds - *window)) {
+      return false;
+    }
+    return seen_exact_keys.emplace(exact_key(run)).second;
+  };
   auto events = get_events(locations, tt_, rtt, time, ev_type, dir,
                            static_cast<std::size_t>(query.n_.value_or(0)),
                            static_cast<std::size_t>(max_results), allowed_clasz,
-                           query.withScheduledSkippedStops_, window);
+                           query.withScheduledSkippedStops_, window,
+                           window_origin_seconds, api_version >= 6 ? 60 : 0,
+                           include_event);
 
   if (events.empty() && query.exactRadius_ && query_stop.has_value() &&
       query.stopId_.has_value()) {
@@ -493,7 +872,8 @@ api::stoptimes_response stop_times::operator()(
           fallback_locations, tt_, rtt, time, ev_type, dir,
           static_cast<std::size_t>(max_results),
           static_cast<std::size_t>(max_results), allowed_clasz,
-          query.withScheduledSkippedStops_, window);
+          query.withScheduledSkippedStops_, window, window_origin_seconds,
+          api_version >= 6 ? 60 : 0, include_event);
 
       auto filtered_events = std::vector<n::rt::run>{};
       for (auto const r : fallback_events) {
@@ -515,15 +895,35 @@ api::stoptimes_response stop_times::operator()(
                                                  ? fr_a[0].get_trip_idx(ev_type)
                                                  : n::trip_idx_t::invalid()};
   };
-  utl::sort(events, [&](n::rt::run const& a, n::rt::run const& b) {
-    return to_tuple(a) < to_tuple(b);
-  });
-  events.erase(std::unique(begin(events), end(events),
-                           [&](n::rt::run const& a, n::rt::run const& b) {
-                             return to_tuple(a) == to_tuple(b);
-                           }),
-               end(events));
-  return {
+  if (api_version >= 6) {
+    utl::sort(events, [&](auto const& a, auto const& b) {
+      return cursor_key(a) < cursor_key(b);
+    });
+    events.erase(std::unique(begin(events), end(events),
+                             [&](auto const& a, auto const& b) {
+                               return cursor_key(a) == cursor_key(b);
+                             }),
+                 end(events));
+    if (decoded_cursor.has_value()) {
+      auto const boundary = std::pair{decoded_cursor->selected_seconds_,
+                                      decoded_cursor->identity_};
+      std::erase_if(events, [&](auto const& event) {
+        return decoded_cursor->direction_ == n::direction::kForward
+                   ? cursor_key(event) <= boundary
+                   : cursor_key(event) >= boundary;
+      });
+    }
+  } else {
+    utl::sort(events, [&](n::rt::run const& a, n::rt::run const& b) {
+      return to_tuple(a) < to_tuple(b);
+    });
+    events.erase(std::unique(begin(events), end(events),
+                             [&](n::rt::run const& a, n::rt::run const& b) {
+                               return to_tuple(a) == to_tuple(b);
+                             }),
+                 end(events));
+  }
+  auto response = api::stoptimes_response{
       .stopTimes_ = utl::to_vec(
           events,
           [&](n::rt::run const r) -> api::StopTime {
@@ -561,6 +961,19 @@ api::stoptimes_response stop_times::operator()(
                      : !s.in_allowed() && s.get_scheduled_stop().in_allowed());
 
             auto const trip_id = tags_.id(tt_, s, ev_type);
+            auto const scheduled_timestamp =
+                to_seconds(s.scheduled_time(ev_type));
+            auto const sequence = static_stop_sequence(
+                tt_, fr.t_.t_idx_, s.get_trip_idx(ev_type), s.stop_idx_);
+            auto const* prediction_diagnostic =
+                rt->vehicle_prediction_diagnostics_ == nullptr ||
+                        !sequence.has_value()
+                    ? nullptr
+                    : rt->vehicle_prediction_diagnostics_->find_event(
+                          fr.t_, trip_id, *sequence, scheduled_timestamp,
+                          ev_type == n::event_type::kArr
+                              ? vehicle_prediction_event_type::kArrival
+                              : vehicle_prediction_event_type::kDeparture);
 
             auto const other_stops = [&](n::event_type desired_event)
                 -> std::optional<std::vector<api::Place>> {
@@ -578,14 +991,12 @@ api::stoptimes_response stop_times::operator()(
                 .mode_ = to_mode(s.get_clasz(ev_type), api_version),
                 .realTime_ = r.is_rt(),
                 .headsign_ = std::string{s.direction(lang, ev_type)},
-                .tripFrom_ =
-                    to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
-                             matches_, ae_, tz_, lang,
-                             s.get_first_trip_stop(ev_type)),
-                .tripTo_ =
-                    to_place(&tt_, &tags_, canonical_stop_registry_, w_, pl_,
-                             matches_, ae_, tz_, lang,
-                             s.get_last_trip_stop(ev_type)),
+                .tripFrom_ = to_place(&tt_, &tags_, canonical_stop_registry_,
+                                      w_, pl_, matches_, ae_, tz_, lang,
+                                      s.get_first_trip_stop(ev_type)),
+                .tripTo_ = to_place(&tt_, &tags_, canonical_stop_registry_, w_,
+                                    pl_, matches_, ae_, tz_, lang,
+                                    s.get_last_trip_stop(ev_type)),
                 .agencyId_ =
                     std::string{tt_.strings_.try_get(agency.id_).value_or("?")},
                 .agencyName_ = std::string{tt_.translate(lang, agency.name_)},
@@ -615,7 +1026,12 @@ api::stoptimes_response stop_times::operator()(
                                    : api::PickupDropoffTypeEnum::NOT_ALLOWED,
                 .cancelled_ = stop_cancelled,
                 .tripCancelled_ = run_cancelled,
-                .source_ = fmt::format("{}", fmt::streamed(fr.dbg()))};
+                .source_ = fmt::format("{}", fmt::streamed(fr.dbg())),
+                .selectedPrediction_ =
+                    api_version >= 6
+                        ? std::optional{selected_prediction(
+                              r, s, ev_type, prediction_diagnostic)}
+                        : std::nullopt};
           }),
       .place_ =
           query_stop
@@ -630,21 +1046,57 @@ api::stoptimes_response stop_times::operator()(
               })
               .value(),
       .previousPageCursor_ =
-          events.empty()
-              ? ""
+          events.empty() ? ""
+          : api_version >= 6
+              ? encode_cursor(
+                    {.direction_ = n::direction::kBackward,
+                     .selected_seconds_ = cursor_key(events.front()).first,
+                     .identity_ = cursor_key(events.front()).second})
               : fmt::format(
                     "EARLIER|{}",
                     to_seconds(
                         n::rt::frun{tt_, rtt, events.front()}[0].time(ev_type) -
                         std::chrono::minutes{1})),
       .nextPageCursor_ =
-          events.empty()
-              ? ""
+          events.empty() ? ""
+          : api_version >= 6
+              ? encode_cursor(
+                    {.direction_ = n::direction::kForward,
+                     .selected_seconds_ = cursor_key(events.back()).first,
+                     .identity_ = cursor_key(events.back()).second})
               : fmt::format(
                     "LATER|{}",
                     to_seconds(
                         n::rt::frun{tt_, rtt, events.back()}[0].time(ev_type) +
                         std::chrono::minutes{1}))};
+  if (query.includePredictionComparison_ &&
+      rt->vehicle_prediction_diagnostics_ != nullptr) {
+    auto debug = std::vector<api::PredictionDebug>{};
+    debug.reserve(events.size());
+    for (auto const [index, run] : utl::enumerate(events)) {
+      auto const fr = n::rt::frun{tt_, rtt, run};
+      auto const s = fr[0];
+      auto const trip_id = tags_.id(tt_, s, ev_type);
+      auto const scheduled = to_seconds(s.scheduled_time(ev_type));
+      auto const sequence = static_stop_sequence(
+          tt_, fr.t_.t_idx_, s.get_trip_idx(ev_type), s.stop_idx_);
+      if (auto const* entry =
+              sequence.has_value()
+                  ? rt->vehicle_prediction_diagnostics_->find_event(
+                        fr.t_, trip_id, *sequence, scheduled,
+                        ev_type == n::event_type::kArr
+                            ? vehicle_prediction_event_type::kArrival
+                            : vehicle_prediction_event_type::kDeparture)
+                  : nullptr;
+          entry != nullptr) {
+        debug.emplace_back(to_api(*entry, index));
+      }
+    }
+    if (!debug.empty()) {
+      response.predictionDebug_ = std::move(debug);
+    }
+  }
+  return response;
 }
 
 }  // namespace motis::ep

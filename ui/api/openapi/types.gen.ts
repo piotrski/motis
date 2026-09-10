@@ -524,6 +524,61 @@ export type Reachable = {
     all?: Array<ReachablePlace>;
 };
 
+export type StopTimesV6Direction = 'EARLIER' | 'LATER';
+
+export type PredictionSource = 'PROVIDER' | 'GPS' | 'SCHEDULE';
+
+export type PredictionEventType = 'ARRIVAL' | 'DEPARTURE';
+
+export type PredictionContext = 'DIRECT' | 'INCOMING_BLOCK_LEG';
+
+export type SelectedPrediction = {
+    source: PredictionSource;
+    /**
+     * Exact RFC 3339 timestamp with second precision.
+     */
+    time: string;
+    /**
+     * Exact RFC 3339 scheduled timestamp with second precision.
+     */
+    scheduledTime: string;
+    delaySeconds: number;
+    confidence?: number;
+    /**
+     * Exact RFC 3339 candidate reference timestamp.
+     */
+    referenceTime?: string;
+    eventType: PredictionEventType;
+    /**
+     * Present when the prediction carries additional provenance. An absent value is equivalent to DIRECT.
+     */
+    context?: PredictionContext;
+};
+
+export type IncomingLegPrediction = {
+    source: PredictionSource;
+    context: PredictionContext;
+    incomingTripId: string;
+    nextTripId: string;
+    routeId: string;
+    routeShortName: string;
+    headsign: string;
+    mode: Mode;
+    /**
+     * Exact RFC 3339 predicted arrival of the incoming leg.
+     */
+    expectedTerminalArrival: string;
+    /**
+     * Exact RFC 3339 scheduled departure of this leg.
+     */
+    nextScheduledDeparture: string;
+    propagatedDelaySeconds: number;
+    /**
+     * Exact RFC 3339 reference timestamp of the incoming GPS prediction.
+     */
+    referenceTime: string;
+};
+
 /**
  * departure or arrival event at a stop
  */
@@ -598,6 +653,65 @@ export type StopTime = {
      * Filename and line number where this trip is from
      */
     source: string;
+    /**
+     * Exact selected event prediction. Present on v6 responses and
+     * omitted from legacy API versions.
+     *
+     */
+    selectedPrediction?: SelectedPrediction;
+};
+
+export type PredictionSelectionReason = 'PROVIDER_ONLY' | 'GPS_ONLY' | 'PROVIDER_HIGHER_CONFIDENCE' | 'GPS_HIGHER_CONFIDENCE' | 'PROVIDER_PROGRESS_INCONSISTENT' | 'PROVIDER_RECOVERY_PENDING' | 'PROVIDER_RECOVERED' | 'SOURCE_HYSTERESIS' | 'NO_USABLE_CANDIDATE' | 'POLICY_UNAVAILABLE';
+
+export type PredictionRejectionReason = 'STALE' | 'LOW_CONFIDENCE' | 'PHYSICALLY_UNREACHABLE' | 'TIMESTAMP_NOT_COMPARABLE' | 'PROGRESS_NOT_COMPARABLE' | 'PROGRESS_INCONSISTENT';
+
+/**
+ * Debug-only reason the vehicle-position ETA estimator could not produce a GPS candidate. Distinct from PredictionRejectionReason, which applies after a candidate reaches source selection.
+ */
+export type GpsEstimationRejectionReason = 'MISSING_TRIP_ID' | 'UNRESOLVED_TRIP' | 'UNSCHEDULED_TRIP' | 'UNSUPPORTED_TRIP_RELATIONSHIP' | 'INSUFFICIENT_HISTORY' | 'STALE_HISTORY' | 'MISSING_SHAPE' | 'OFF_SHAPE' | 'AMBIGUOUS_PROGRESS' | 'NON_MONOTONIC_PROGRESS' | 'INVALID_OBSERVATION_TIME' | 'IMPOSSIBLE_SPEED' | 'IMPOSSIBLE_TRAVEL_TIME' | 'TERMINAL';
+
+export type PredictionCandidate = {
+    source: PredictionSource;
+    /**
+     * Predicted Unix timestamp in seconds.
+     */
+    time: number;
+    delaySeconds: number;
+    confidence?: number;
+    /**
+     * Candidate reference Unix timestamp in seconds.
+     */
+    referenceTime?: number;
+};
+
+export type PredictionDebug = {
+    stopTimeIndex: number;
+    tripId: string;
+    stopSequence: number;
+    selectedSource: PredictionSource;
+    selectionReason: PredictionSelectionReason;
+    provider?: PredictionCandidate;
+    gps?: PredictionCandidate;
+    effective: PredictionCandidate;
+    selectedConfidence?: number;
+    providerRejection?: PredictionRejectionReason;
+    gpsRejection?: PredictionRejectionReason;
+    gpsEstimationRejection?: GpsEstimationRejectionReason;
+    /**
+     * Present for predictions propagated from an incoming block leg. An absent value is equivalent to DIRECT.
+     */
+    context?: PredictionContext;
+    /**
+     * Latest vehicle observation Unix timestamp in seconds.
+     */
+    latestVehicleObservationTime?: number;
+    candidateTimestampSkewSeconds?: number;
+    projectionErrorMeters?: number;
+    progressDifferenceMeters?: number;
+    sourceTransition: boolean;
+    providerRecovery: boolean;
+    flap: boolean;
+    providerConsistentCycles: number;
 };
 
 /**
@@ -1081,6 +1195,115 @@ export type RentalVehicle = {
     rentalUriWeb?: string;
 };
 
+export type TransitVehicleRouteInfo = {
+    id: string;
+    shortName: string;
+    longName: string;
+    color?: string;
+    textColor?: string;
+};
+
+export type VehicleShapeSource = 'NONE' | 'TIMETABLE' | 'ROUTED';
+
+export type TransitVehicleDescriptor = {
+    id?: string;
+    label?: string;
+    licensePlate?: string;
+    wheelchairAccessible?: string;
+};
+
+export type TransitVehicleTripDescriptor = {
+    tripId?: string;
+    /**
+     * Resolved MOTIS trip id for the static/realtime run when the vehicle can be matched to the timetable.
+     */
+    scheduledTripId?: string;
+    startDate?: string;
+    startTime?: string;
+    routeId?: string;
+    /**
+     * Passenger-facing trip headsign resolved from the static timetable when available.
+     */
+    headsign?: string;
+    directionId?: number;
+    scheduleRelationship?: string;
+};
+
+export type ReportedVehiclePosition = {
+    /**
+     * latitude
+     */
+    lat: number;
+    /**
+     * longitude
+     */
+    lon: number;
+    /**
+     * Bearing in degrees.
+     */
+    bearing?: number;
+    /**
+     * Speed in meters per second.
+     */
+    speedMps?: number;
+};
+
+export type VehicleMatchState = 'MATCHED_TRIP' | 'MATCHED_ROUTE_ONLY' | 'UNMATCHED';
+
+export type VehiclePosition = {
+    /**
+     * Realtime feed identity for this vehicle position.
+     */
+    feedId: string;
+    /**
+     * GTFS Realtime FeedEntity id.
+     */
+    entityId: string;
+    vehicle: TransitVehicleDescriptor;
+    trip: TransitVehicleTripDescriptor;
+    /**
+     * Timetable matching tier reached for this vehicle.
+     */
+    matchState: VehicleMatchState;
+    /**
+     * Passenger-facing route metadata for marker labels and colors when resolvable.
+     */
+    route?: TransitVehicleRouteInfo;
+    reportedPosition: ReportedVehiclePosition;
+    /**
+     * Transit mode for this vehicle when resolvable.
+     */
+    mode?: Mode;
+    /**
+     * Encoded trip or route shape for map animation when resolvable.
+     */
+    shape?: EncodedPolyline;
+    /**
+     * Stable identifier for caching the encoded shape across position polls.
+     */
+    shapeId?: string;
+    /**
+     * Source of the returned shape.
+     */
+    shapeSource?: VehicleShapeSource;
+    currentStopSequence?: number;
+    stopId?: string;
+    currentStatus?: string;
+    occupancyStatus?: string;
+    /**
+     * VehiclePosition timestamp from the realtime feed as Unix seconds.
+     */
+    reportedTime?: number;
+    /**
+     * Server ingest timestamp as Unix seconds.
+     */
+    ingestedTime: number;
+};
+
+export type VehiclePositionsResponse = {
+    vehicles: Array<VehiclePosition>;
+};
+
 export type RentalZone = {
     /**
      * Unique identifier of the rental provider
@@ -1206,6 +1429,12 @@ export type Leg = {
     agencyUrl?: string;
     agencyId?: string;
     tripId?: string;
+    /**
+     * Deterministically selected live vehicle for this transit leg when
+     * a current VehiclePosition can be matched to its trip.
+     *
+     */
+    primaryVehicle?: (VehiclePosition | null);
     routeShortName?: string;
     routeLongName?: string;
     tripShortName?: string;
@@ -1381,6 +1610,12 @@ export type FareTransfer = {
     effectiveFareLegProducts: Array<Array<Array<FareProduct>>>;
 };
 
+export type IntermediateStopEvent = {
+    place: Place;
+    arrivalPrediction?: SelectedPrediction;
+    departurePrediction?: SelectedPrediction;
+};
+
 export type Itinerary = {
     /**
      * journey duration in seconds
@@ -1406,6 +1641,13 @@ export type Itinerary = {
      * Fare information
      */
     fareTransfers?: Array<FareTransfer>;
+    startPrediction?: SelectedPrediction;
+    endPrediction?: SelectedPrediction;
+    intermediateStopEvents?: Array<IntermediateStopEvent>;
+    /**
+     * GPS timing propagated from the immediately preceding trip on the same block. Present only on v6 trip responses while that context is selected and fresh.
+     */
+    incomingLegPrediction?: IncomingLegPrediction;
 };
 
 /**
@@ -1851,6 +2093,17 @@ export type RouteInfo = {
     routeIdx: number;
     pathSource: RoutePathSource;
     segments: Array<RouteSegment>;
+};
+
+export type HealthResponse = {
+    /**
+     * GTFSRT, SIRI Lite, VDV AUS, VDV454 feeds.
+     */
+    rt?: boolean;
+    /**
+     * GBFS feeds.
+     */
+    gbfs?: boolean;
 };
 
 export type PlanData = {
@@ -3023,6 +3276,20 @@ export type GeocodeResponse = (Array<Match>);
 
 export type GeocodeError = (Error);
 
+export type TripV6Data = {
+    query: {
+        detailedLegs?: boolean;
+        joinInterlinedLegs?: boolean;
+        language?: Array<(string)>;
+        tripId: string;
+        withScheduledSkippedStops?: boolean;
+    };
+};
+
+export type TripV6Response = (Itinerary);
+
+export type TripV6Error = (Error);
+
 export type TripData = {
     query: {
         /**
@@ -3062,6 +3329,48 @@ export type TripData = {
 export type TripResponse = (Itinerary);
 
 export type TripError = (Error);
+
+export type StoptimesV6Data = {
+    query?: {
+        arriveBy?: boolean;
+        center?: string;
+        direction?: StopTimesV6Direction;
+        exactRadius?: boolean;
+        fetchStops?: boolean;
+        /**
+         * Debug only. Include sparse provider/GPS prediction comparison data.
+         * The default response is unchanged when this parameter is omitted or false.
+         *
+         */
+        includePredictionComparison?: boolean;
+        language?: Array<(string)>;
+        mode?: Array<Mode>;
+        n?: number;
+        pageCursor?: string;
+        radius?: number;
+        stopId?: string;
+        time?: string;
+        window?: number;
+        withAlerts?: boolean;
+        withScheduledSkippedStops?: boolean;
+    };
+};
+
+export type StoptimesV6Response = ({
+    stopTimes: Array<StopTime>;
+    place: Place;
+    previousPageCursor: string;
+    nextPageCursor: string;
+    /**
+     * Sparse debug data keyed to stopTimes by stopTimeIndex.
+     * Present only when includePredictionComparison=true and matching
+     * diagnostics exist for a returned stop time.
+     *
+     */
+    predictionDebug?: Array<PredictionDebug>;
+});
+
+export type StoptimesV6Error = (Error);
 
 export type StoptimesData = {
     query?: {
@@ -3111,6 +3420,12 @@ export type StoptimesData = {
          *
          */
         fetchStops?: boolean;
+        /**
+         * Debug only. Include sparse provider/GPS prediction comparison data.
+         * The default response is unchanged when this parameter is omitted or false.
+         *
+         */
+        includePredictionComparison?: boolean;
         /**
          * language tags as used in OpenStreetMap / GTFS
          * (usually BCP-47 / ISO 639-1, or ISO 639-2 if there's no ISO 639-1)
@@ -3196,6 +3511,13 @@ export type StoptimesResponse = ({
      *
      */
     nextPageCursor: string;
+    /**
+     * Sparse debug data keyed to stopTimes by stopTimeIndex.
+     * Present only when includePredictionComparison=true and matching
+     * diagnostics exist for a returned stop time.
+     *
+     */
+    predictionDebug?: Array<PredictionDebug>;
 });
 
 export type StoptimesError = (Error);
@@ -3361,6 +3683,49 @@ export type RouteDetailsResponse = ({
 
 export type RouteDetailsError = (Error);
 
+export type VehiclesData = {
+    query: {
+        /**
+         * Include encoded shape geometry in each vehicle. Set this to false
+         * after caching shapes by shapeId to keep frequent position polls small.
+         *
+         */
+        includeShapes?: boolean;
+        /**
+         * Include vehicle positions that could not be matched to a timetable
+         * trip or route. Intended for realtime feed-quality inspection.
+         *
+         */
+        includeUnmatched?: boolean;
+        /**
+         * language tags as used in OpenStreetMap / GTFS
+         * (usually BCP-47 / ISO 639-1, or ISO 639-2 if there's no ISO 639-1)
+         *
+         */
+        language?: Array<(string)>;
+        /**
+         * latitude,longitude pair of the opposite viewport corner
+         */
+        max: string;
+        /**
+         * Maximum vehicle position age in seconds. Age is based on the
+         * realtime feed's reported timestamp when present and otherwise on
+         * the server ingest timestamp. When omitted, the server uses the
+         * larger of 60 seconds and three timetable update intervals.
+         *
+         */
+        maxAge?: number;
+        /**
+         * latitude,longitude pair of one viewport corner
+         */
+        min: string;
+    };
+};
+
+export type VehiclesResponse = (VehiclePositionsResponse);
+
+export type VehiclesError = (Error);
+
 export type RentalsData = {
     query?: {
         /**
@@ -3433,6 +3798,10 @@ export type RentalsResponse = ({
 });
 
 export type RentalsError = (Error);
+
+export type HealthResponse2 = (HealthResponse);
+
+export type HealthError = (HealthResponse);
 
 export type TransfersData = {
     query: {
