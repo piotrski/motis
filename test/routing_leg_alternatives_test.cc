@@ -7,6 +7,7 @@
 #include <string>
 #include <system_error>
 
+#include "boost/json/parse.hpp"
 #include "date/date.h"
 
 #include "utl/init_from.h"
@@ -20,6 +21,7 @@
 #include "motis/elevators/elevators.h"
 #include "motis/elevators/parse_fasta.h"
 #include "motis/endpoints/routing.h"
+#include "motis/endpoints/update_elevator.h"
 #include "motis/import.h"
 #include "motis/update_rtt_td_footpaths.h"
 
@@ -814,6 +816,8 @@ TEST(motis, routing_leg_alternatives_td_footpath_blocked) {
       *d.w_, *d.l_, *d.pl_, *d.tt_, *d.location_rtree_, *d.rt_->e_,
       *elevator_footpath_map, *d.matches_, *d.rt_->rtt_,
       std::chrono::seconds{c.timetable_->max_footpath_length_ * 60});
+  d.rt_->provider_rtt_ =
+      std::make_unique<n::rt_timetable>(*d.rt_->rtt_);
 
   // Delay the LOCAL 00:35 ICE alt by 1 min — this is a frequency-
   // expanded trip instance, so trip_id stays "ICE" and start_time
@@ -869,6 +873,25 @@ METRO S3 FFM Hbf 02:15->FFM Hauptwache 02:20
   alt [WALK START 01:16->FFM Hbf 03:15 | METRO S3 FFM Hbf 03:15->FFM Hauptwache 03:20 | WALK FFM Hauptwache 03:20->END 03:29]
 )",
             to_str(res_b.itineraries_.front()));
+
+  auto const update_elevator =
+      utl::init_from<ep::update_elevator>(d).value();
+  update_elevator(boost::json::parse(
+      R"({"id":10561326,"status":"ACTIVE","outOfService":[]})"));
+  ASSERT_GT(d.rt_->rtt_->n_rt_transports(),
+            d.rt_->provider_rtt_->n_rt_transports());
+  for (auto i = n::location_idx_t{0U}; i != d.tt_->n_locations(); ++i) {
+    EXPECT_EQ(d.rt_->rtt_->has_td_footpaths_out_[2].test(i),
+              d.rt_->provider_rtt_->has_td_footpaths_out_[2].test(i));
+    EXPECT_EQ(d.rt_->rtt_->has_td_footpaths_in_[2].test(i),
+              d.rt_->provider_rtt_->has_td_footpaths_in_[2].test(i));
+    EXPECT_TRUE(std::ranges::equal(
+        d.rt_->rtt_->td_footpaths_out_[2][i],
+        d.rt_->provider_rtt_->td_footpaths_out_[2][i]));
+    EXPECT_TRUE(std::ranges::equal(
+        d.rt_->rtt_->td_footpaths_in_[2][i],
+        d.rt_->provider_rtt_->td_footpaths_in_[2][i]));
+  }
 }
 
 // Two-leg journey A → B → C where the first transit leg has three
