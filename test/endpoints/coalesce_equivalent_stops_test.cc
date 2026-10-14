@@ -59,10 +59,10 @@ M,Agency M,https://m.example,Europe/Warsaw
 
 # stops.txt
 stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,stop_desc,platform_code
-RM,Rondo Mogilskie,50.067030,19.945030,0,,01,01
-TS,Teatr Slowackiego,50.064530,19.941030,0,,01,01
-SP1,Shared Pole,50.066210,19.942210,0,,01,01
-SP2,Shared Pole,50.066270,19.942270,0,,02,02
+RM,Rondo Mogilskie,50.067030,19.945030,0,,,01
+TS,Teatr Slowackiego,50.064530,19.941030,0,,Museum terminus,01
+SP1,Shared Pole,50.066210,19.942210,0,,,01
+SP2,Shared Pole,50.066270,19.942270,0,,,02
 NP,No Platform,50.066610,19.942610,0,,01,
 
 # routes.txt
@@ -168,6 +168,22 @@ TEST(motis, coalesce_equivalent_stops) {
   EXPECT_NE(end(stop_ids_on), utl::find(stop_ids_on, "a_NP"));
   EXPECT_NE(end(stop_ids_on), utl::find(stop_ids_on, "m_NP"));
   EXPECT_NE(end(stop_ids_on), utl::find(stop_ids_on, "t_NP"));
+
+  // Optional feed descriptions do not change platform identity.
+  EXPECT_EQ(end(stop_ids_on), utl::find(stop_ids_on, "m_RM"));
+  EXPECT_EQ(end(stop_ids_on), utl::find(stop_ids_on, "m_TS"));
+  EXPECT_EQ(end(stop_ids_on), utl::find(stop_ids_on, "m_SP1"));
+  EXPECT_EQ(end(stop_ids_on), utl::find(stop_ids_on, "m_SP2"));
+  auto const shared_pole_01 = utl::find_if(map_on, [](api::Place const& p) {
+    return p.stopId_ == "a_SP1";
+  });
+  auto const shared_pole_02 = utl::find_if(map_on, [](api::Place const& p) {
+    return p.stopId_ == "a_SP2";
+  });
+  ASSERT_NE(end(map_on), shared_pole_01);
+  ASSERT_NE(end(map_on), shared_pole_02);
+  EXPECT_EQ("01", shared_pole_01->track_);
+  EXPECT_EQ("02", shared_pole_02->track_);
 
   auto const stop_times_off_res =
       stop_times_off("/api/v5/stoptimes?stopId=m_RM&time=2020-01-01T08:55:00.000Z"
