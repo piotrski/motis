@@ -38,6 +38,7 @@
 #include "motis/odm/bounds.h"
 #include "motis/point_rtree.h"
 #include "motis/railviz.h"
+#include "motis/rt/passed_stops.h"
 #include "motis/tag_lookup.h"
 #include "motis/tiles_data.h"
 #include "motis/tt_location_rtree.h"

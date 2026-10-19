@@ -28,6 +28,7 @@
 namespace motis {
 
 struct elevators;
+struct passed_stop_store;
 
 template <typename T>
 struct point_rtree;
@@ -59,6 +60,7 @@ struct rt {
   ptr<vehicle_positions::vehicle_position_store> vehicle_positions_;
   ptr<vehicle_observation_history> vehicle_observation_history_;
   ptr<vehicle_prediction_diagnostics_store> vehicle_prediction_diagnostics_;
+  ptr<passed_stop_store> passed_stops_;
 };
 
 struct data {

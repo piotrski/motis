@@ -32,6 +32,7 @@
 #include "motis/config.h"
 #include "motis/data.h"
 #include "motis/endpoints/stop_times.h"
+#include "motis/endpoints/trip.h"
 #include "motis/import.h"
 #include "motis/metrics_registry.h"
 #include "motis/rt_update.h"
@@ -1433,6 +1434,115 @@ TEST(motis_rt_update, mixed_auser_resynchronizes_on_service_day_rollover) {
 
 TEST(motis_rt_update, auser_only_resynchronizes_on_service_day_rollover) {
   test_auser_resynchronizes_on_service_day_rollover(false);
+}
+
+TEST(motis_rt_update, passed_stops_keep_delay_when_feed_omits_them) {
+  constexpr auto kThreeStopGtfs = R"(
+# agency.txt
+agency_id,agency_name,agency_url,agency_timezone
+test,Test,https://example.test,UTC
+
+# stops.txt
+stop_id,stop_name,stop_lat,stop_lon
+stop-1,Stop 1,50.061,19.938
+stop-2,Stop 2,50.071,19.948
+stop-3,Stop 3,50.081,19.958
+
+# routes.txt
+route_id,agency_id,route_short_name,route_type
+route-1,test,1,3
+
+# trips.txt
+route_id,service_id,trip_id,trip_headsign
+route-1,service-1,trip-1,Stop 3
+
+# stop_times.txt
+trip_id,arrival_time,departure_time,stop_id,stop_sequence
+trip-1,10:00:00,10:00:00,stop-1,1
+trip-1,10:05:00,10:05:00,stop-2,2
+trip-1,10:10:00,10:10:00,stop-3,3
+
+# calendar_dates.txt
+service_id,date,exception_type
+service-1,{},1
+)";
+  auto const test_dir = fs::absolute("test/data/rt-passed-stops");
+  auto ec = std::error_code{};
+  fs::remove_all(test_dir, ec);
+  fs::create_directories(test_dir);
+  auto cwd = cwd_guard{test_dir};
+  auto const today =
+      std::chrono::floor<date::days>(std::chrono::system_clock::now());
+  auto const service_date = date::format("%Y%m%d", today);
+  auto const gtfs =
+      std::vformat(kThreeStopGtfs, std::make_format_args(service_date));
+  auto const update = [&](unsigned const seq, std::string const& stop,
+                          std::int32_t const delay_minutes) {
+    auto msg = to_feed_msg(
+        {trip_update{.trip_ = {.trip_id_ = "trip-1",
+                               .start_time_ = "10:00:00",
+                               .date_ = service_date},
+                     .stop_updates_ = {{.stop_id_ = stop,
+                                        .seq_ = seq,
+                                        .ev_type_ = nigiri::event_type::kDep,
+                                        .delay_minutes_ = delay_minutes}}}},
+        today + 10h);
+    msg.mutable_header()->clear_timestamp();
+    return msg.SerializeAsString();
+  };
+  // Cycle 1: +2 min from stop 1. Cycles 2 and 3: the feed starts at stop 3.
+  auto server = response_server{
+      std::vector{update(1U, "stop-1", 2), update(3U, "stop-3", 3),
+                  update(3U, "stop-3", 4)},
+      0ms};
+  auto const c = config{
+      .timetable_ = {config::timetable{
+          .first_day_ = date::format("%F", today),
+          .num_days_ = 2,
+          .update_interval_ = 1,
+          .datasets_ = {{"test",
+                         {.path_ = gtfs,
+                          .rt_ = {{{.url_ = server.url(),
+                                    .last_good_ttl_ = 30U}}}}}}}},
+      .street_routing_ = false};
+  import(c, "data");
+  auto d = data{"data", c};
+  auto current_time = std::chrono::system_clock::time_point{today + 10h + 4min};
+  auto ioc = boost::asio::io_context{};
+  run_rt_update(ioc, c, d, {.now_ = [&] { return current_time; }});
+  ioc.run_for(500ms);
+
+  auto const trip_ep = utl::init_from<ep::trip>(d).value();
+  auto const trip_id = std::format("{}_10%3A00_test_trip-1", service_date);
+  auto const stop_2 = [&]() {
+    auto const res = trip_ep(std::format("/api/v6/trip?tripId={}", trip_id));
+    EXPECT_EQ(res.legs_.size(), 1U);
+    EXPECT_EQ(res.legs_.front().intermediateStops_->size(), 1U);
+    return res.legs_.front().intermediateStops_->front();
+  };
+  auto const first = stop_2();
+  ASSERT_TRUE(first.arrivalPrediction_.has_value());
+  EXPECT_EQ(first.arrivalPrediction_->delaySeconds_, 120);
+  EXPECT_FALSE(first.arrivalPrediction_->status_.has_value());
+
+  // 10:08 and 10:12: past stop 2's predicted 10:07, so the frozen time is
+  // the prediction, not the moment the feed dropped the stop.
+  for (auto const cycle : {2, 3}) {
+    current_time += 4min;
+    ioc.restart();
+    ioc.run_for(1100ms);
+    SCOPED_TRACE(cycle);
+    auto const passed = stop_2();
+    ASSERT_TRUE(passed.arrivalPrediction_.has_value());
+    EXPECT_EQ(passed.arrivalPrediction_->delaySeconds_, 120);
+    EXPECT_EQ(passed.arrivalPrediction_->status_,
+              api::PredictionStatusEnum::PASSED);
+    ASSERT_TRUE(passed.departurePrediction_.has_value());
+    EXPECT_EQ(passed.departurePrediction_->status_,
+              api::PredictionStatusEnum::PASSED);
+  }
+  ioc.stop();
+  EXPECT_EQ(server.requests(), 3U);
 }
 
 }  // namespace

@@ -31,6 +31,7 @@
 #include "motis/journey_to_response.h"
 #include "motis/parse_location.h"
 #include "motis/place.h"
+#include "motis/rt/passed_stops.h"
 #include "motis/server.h"
 #include "motis/tag_lookup.h"
 #include "motis/timetable/clasz_to_mode.h"
@@ -234,8 +235,24 @@ api::SelectedPrediction selected_prediction(
     n::rt::run const& run,
     n::rt::run_stop const& stop,
     n::event_type const event_type,
-    vehicle_prediction_diagnostic_entry const* const diagnostic) {
+    vehicle_prediction_diagnostic_entry const* const diagnostic,
+    passed_stop_store const* const passed_stops) {
   auto const scheduled = to_seconds(stop.scheduled_time(event_type));
+  if (auto const* passed =
+          passed_stops == nullptr
+              ? nullptr
+              : passed_stops->find(run.t_, stop.stop_idx_, event_type);
+      passed != nullptr) {
+    auto const time = to_seconds(stop.time(event_type));
+    return {.source_ = to_api(passed->source_),
+            .time_ = rfc3339(time),
+            .scheduledTime_ = rfc3339(scheduled),
+            .delaySeconds_ = time - scheduled,
+            .eventType_ = event_type == n::event_type::kArr
+                              ? api::PredictionEventTypeEnum::ARRIVAL
+                              : api::PredictionEventTypeEnum::DEPARTURE,
+            .status_ = api::PredictionStatusEnum::PASSED};
+  }
   auto const selected = resolve_effective_prediction(
       run.is_rt(), scheduled, to_seconds(stop.time(event_type)), diagnostic);
   return {
@@ -1041,7 +1058,8 @@ api::stoptimes_response stop_times::operator()(
                 .selectedPrediction_ =
                     api_version >= 6
                         ? std::optional{selected_prediction(
-                              r, s, ev_type, prediction_diagnostic)}
+                              r, s, ev_type, prediction_diagnostic,
+                              rt->passed_stops_.get())}
                         : std::nullopt};
           }),
       .place_ =

@@ -456,6 +456,11 @@ export const PredictionContextSchema = {
     enum: ['DIRECT', 'INCOMING_BLOCK_LEG']
 } as const;
 
+export const PredictionStatusSchema = {
+    type: 'string',
+    enum: ['PREDICTED', 'PASSED']
+} as const;
+
 export const SelectedPredictionSchema = {
     type: 'object',
     required: ['source', 'time', 'scheduledTime', 'delaySeconds', 'eventType'],
@@ -489,6 +494,15 @@ export const SelectedPredictionSchema = {
         context: {
             description: 'Present when the prediction carries additional provenance. An absent value is equivalent to DIRECT.',
             '$ref': '#/components/schemas/PredictionContext'
+        },
+        status: {
+            description: `\`PASSED\` when the vehicle has already passed this stop: \`time\` is
+the last predicted (or, for GPS, observed) time of the event, kept
+after the realtime feed stopped describing the stop. \`source\` says
+where that time came from. An absent value is equivalent to
+\`PREDICTED\`.
+`,
+            '$ref': '#/components/schemas/PredictionStatus'
         }
     }
 } as const;

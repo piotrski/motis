@@ -17,6 +17,7 @@
 #include "motis/gbfs/routing_data.h"
 #include "motis/journey_to_response.h"
 #include "motis/parse_location.h"
+#include "motis/rt/passed_stops.h"
 #include "motis/rt/vehicle_matching.h"
 #include "motis/rt/vehicle_prediction_store.h"
 #include "motis/server.h"
@@ -69,9 +70,26 @@ api::SelectedPrediction selected_prediction(
     tag_lookup const& tags,
     n::rt::run_stop const& stop,
     n::event_type const event_type,
-    vehicle_prediction_diagnostics_store const* const diagnostics) {
+    vehicle_prediction_diagnostics_store const* const diagnostics,
+    passed_stop_store const* const passed_stops) {
   auto const& run = *stop.fr_;
   auto const scheduled = to_seconds(stop.scheduled_time(event_type));
+  auto const api_event_type = event_type == n::event_type::kArr
+                                  ? api::PredictionEventTypeEnum::ARRIVAL
+                                  : api::PredictionEventTypeEnum::DEPARTURE;
+  if (auto const* passed =
+          passed_stops == nullptr
+              ? nullptr
+              : passed_stops->find(run.t_, stop.stop_idx_, event_type);
+      passed != nullptr) {
+    auto const time = to_seconds(stop.time(event_type));
+    return {.source_ = prediction_source(passed->source_),
+            .time_ = rfc3339(time),
+            .scheduledTime_ = rfc3339(scheduled),
+            .delaySeconds_ = time - scheduled,
+            .eventType_ = api_event_type,
+            .status_ = api::PredictionStatusEnum::PASSED};
+  }
   auto const sequence = static_stop_sequence(
       tt, run.t_.t_idx_, stop.get_trip_idx(event_type), stop.stop_idx_);
   auto const* entry =
@@ -91,9 +109,7 @@ api::SelectedPrediction selected_prediction(
           .confidence_ = selected.confidence_,
           .referenceTime_ = selected.reference_timestamp_seconds_.transform(
               [](auto const timestamp) { return rfc3339(timestamp); }),
-          .eventType_ = event_type == n::event_type::kArr
-                            ? api::PredictionEventTypeEnum::ARRIVAL
-                            : api::PredictionEventTypeEnum::DEPARTURE,
+          .eventType_ = api_event_type,
           .context_ = prediction_context(entry)};
 }
 
@@ -163,11 +179,12 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
       vehicle_matching::freshness_cutoff(now, max_age);
 
   auto const* const diagnostics = rt->vehicle_prediction_diagnostics_.get();
+  auto const* const passed_stops = rt->passed_stops_.get();
   auto const attach_stop_prediction = [&](api::Place& place,
                                           n::rt::run_stop const& stop,
                                           n::event_type const event_type) {
-    auto prediction =
-        selected_prediction(tt_, tags_, stop, event_type, diagnostics);
+    auto prediction = selected_prediction(tt_, tags_, stop, event_type,
+                                          diagnostics, passed_stops);
     (event_type == n::event_type::kArr ? place.arrivalPrediction_
                                        : place.departurePrediction_) =
         std::move(prediction);
@@ -212,7 +229,7 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
     auto const prediction = [&](n::stop_idx_t const stop_idx,
                                 n::event_type const event_type) {
       return selected_prediction(tt_, tags_, fr[stop_idx], event_type,
-                                 diagnostics);
+                                 diagnostics, passed_stops);
     };
     response.startPrediction_ = prediction(0U, n::event_type::kDep);
     response.endPrediction_ = prediction(

@@ -3643,6 +3643,12 @@ components:
         - DIRECT
         - INCOMING_BLOCK_LEG
 
+    PredictionStatus:
+      type: string
+      enum:
+        - PREDICTED
+        - PASSED
+
     SelectedPrediction:
       type: object
       required:
@@ -3676,6 +3682,14 @@ components:
             Present when the prediction carries additional provenance. An
             absent value is equivalent to DIRECT.
           $ref: '#/components/schemas/PredictionContext'
+        status:
+          description: |
+            `PASSED` when the vehicle has already passed this stop: `time` is
+            the last predicted (or, for GPS, observed) time of the event, kept
+            after the realtime feed stopped describing the stop. `source` says
+            where that time came from. An absent value is equivalent to
+            `PREDICTED`.
+          $ref: '#/components/schemas/PredictionStatus'
 
     Place:
       type: object

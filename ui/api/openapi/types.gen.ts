@@ -388,6 +388,8 @@ export type PredictionEventType = 'ARRIVAL' | 'DEPARTURE';
 
 export type PredictionContext = 'DIRECT' | 'INCOMING_BLOCK_LEG';
 
+export type PredictionStatus = 'PREDICTED' | 'PASSED';
+
 export type SelectedPrediction = {
     source: PredictionSource;
     /**
@@ -409,6 +411,15 @@ export type SelectedPrediction = {
      * Present when the prediction carries additional provenance. An absent value is equivalent to DIRECT.
      */
     context?: PredictionContext;
+    /**
+     * `PASSED` when the vehicle has already passed this stop: `time` is
+     * the last predicted (or, for GPS, observed) time of the event, kept
+     * after the realtime feed stopped describing the stop. `source` says
+     * where that time came from. An absent value is equivalent to
+     * `PREDICTED`.
+     *
+     */
+    status?: PredictionStatus;
 };
 
 export type Place = {

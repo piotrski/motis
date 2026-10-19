@@ -52,6 +52,7 @@
 #include "motis/http_req.h"
 #include "motis/railviz.h"
 #include "motis/rt/auser.h"
+#include "motis/rt/passed_stops.h"
 #include "motis/rt/rt_metrics.h"
 #include "motis/rt/trip_progress_diagnostics.h"
 #include "motis/rt/vehicle_eta_calibration.h"
@@ -1323,6 +1324,16 @@ void run_rt_update(boost::asio::io_context& ioc,
               transit_realtime::FeedMessage msg_;
             };
             auto applied_gtfsrt_updates = std::vector<applied_gtfsrt_update>{};
+            auto trip_positions = std::vector<trip_update_position>{};
+            auto const record_trip_positions =
+                [&](gtfs_rt_endpoint const& g,
+                    transit_realtime::FeedMessage const& msg) {
+                  auto positions = trip_update_positions(g.src_, msg);
+                  trip_positions.insert(
+                      end(trip_positions),
+                      std::make_move_iterator(begin(positions)),
+                      std::make_move_iterator(end(positions)));
+                };
             auto provider_timetable_baseline =
                 std::unique_ptr<n::rt_timetable>{};
             auto feed_apply_timetable_clones = std::size_t{0U};
@@ -1658,6 +1669,7 @@ void run_rt_update(boost::asio::io_context& ioc,
                 auto stats = apply_gtfsrt(g, prepared, *prepared.msg_, false);
                 results[prepared.endpoint_idx_] = {std::move(stats),
                                                    prepared.source_success_};
+                record_trip_positions(g, *prepared.msg_);
                 applied_gtfsrt_updates.push_back(
                     {prepared.endpoint_idx_, std::move(*prepared.msg_)});
               } catch (std::exception const& e) {
@@ -1672,6 +1684,7 @@ void run_rt_update(boost::asio::io_context& ioc,
                   try {
                     results[prepared.endpoint_idx_] = {
                         apply_gtfsrt(g, fallback, *fallback.msg_, true), false};
+                    record_trip_positions(g, *fallback.msg_);
                     applied_gtfsrt_updates.push_back(
                         {fallback.endpoint_idx_, std::move(*fallback.msg_)});
                   } catch (std::exception const& fallback_error) {
@@ -2207,6 +2220,24 @@ void run_rt_update(boost::asio::io_context& ioc,
               }
             }
 
+            // Feeds that only describe the stops ahead of a vehicle would
+            // otherwise drop passed stops back to the schedule on every
+            // rebuild. Freeze them into the provider baseline, after the GPS
+            // selection so they stay before the overlay's next event.
+            auto passed_stops = std::make_unique<passed_stop_store>(
+                update_passed_stops(
+                    {.tt_ = *d.tt_,
+                     .tags_ = *d.tags_,
+                     .today_ = today,
+                     .now_seconds_ = cycle_now,
+                     .previous_ = published_rt->passed_stops_.get(),
+                     .previous_rtt_ = published_rt->rtt_.get(),
+                     .previous_diagnostics_ =
+                         published_rt->vehicle_prediction_diagnostics_.get(),
+                     .candidates_ = prediction_candidates,
+                     .overlays_ = selected_overlays},
+                    *rtt, trip_positions));
+
             auto const timetable_clone_started =
                 std::chrono::steady_clock::now();
             auto effective_rtt = std::make_unique<n::rt_timetable>(*rtt);
@@ -2260,6 +2291,7 @@ void run_rt_update(boost::asio::io_context& ioc,
                 std::move(railviz_rt), std::move(vehicle_position_store),
                 std::move(vehicle_history),
                 std::move(pending_prediction_diagnostics));
+            new_rt->passed_stops_ = std::move(passed_stops);
             std::atomic_store(&d.rt_, std::move(new_rt));
 
             d.metrics_->last_update_rt_.SetToCurrentTime();
