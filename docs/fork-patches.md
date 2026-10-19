@@ -37,9 +37,11 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 - Source: `codex/live-vehicles-gps-v6` (PR #52)
 - Purpose: expose identity-safe live vehicle observations and combine bounded GPS, provider, and schedule prediction candidates
 - API: v6 `trip` legs carry `arrivalPrediction` / `departurePrediction` on each stop visit (`from`, `to`, `intermediateStops`), scoped to that leg's run; the block-wide `startPrediction`, `endPrediction` and `intermediateStopEvents` stay for compatibility. `journey_to_response` takes an optional stop-event hook for this, so keep it when rebasing onto upstream.
+- Passed stops: feeds that only describe the stops ahead of a vehicle (ZTP Kraków) used to drop passed stops back to the schedule on every rebuild. `src/rt/passed_stops.cc` freezes each passed stop event at its last published time (the observed GPS passage when GPS was selected), capped at the moment the feed first omitted it and kept before the vehicle's next event, and writes it into the provider baseline every cycle while the trip stays in the feed. Predictions for those events carry `status: PASSED`. In memory only: a restart loses frozen times of stops passed before it.
 - Tests to run:
   - `motis-test --gtest_filter='motis_vehicle_positions.*:vehicle_prediction*.*:trip_progress_projection.*'`
   - `motis-test --gtest_filter='motis.stop_times:motis.trip*:motis_rt_update.*'`
+  - `motis-test --gtest_filter='passed_stops.*:motis_rt_update.passed_stops*'`
   - full `motis-test`
 
 ## Resolved Upstream
