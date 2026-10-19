@@ -153,7 +153,7 @@ TEST(gtfsrt_service_day, night_trip_before_midnight_uses_that_evening) {
   EXPECT_EQ("20190501", msg.entity(0).trip_update().trip().start_date());
 }
 
-TEST(gtfsrt_service_day, trip_id_of_a_later_service_day_is_not_attached) {
+TEST(gtfsrt_service_day, trip_id_of_a_later_service_day_is_left_as_sent) {
   auto const f = fixture{};
   // The feed names tonight's run with an id that only runs from service day
   // 2 May (00:15 on 3 May): without inference it resolves 24 hours ahead.
@@ -162,15 +162,16 @@ TEST(gtfsrt_service_day, trip_id_of_a_later_service_day_is_not_attached) {
   EXPECT_EQ(kMay1 + 48h + 15min,
             f.resolved_departure(raw.entity(0).trip_update().trip(), now));
 
+  // No run of NEW operates around now: the descriptors are left as sent
+  // (and counted) rather than dropped, so the vehicle stays visible.
   auto msg = feed("NEW");
   auto const stats = infer_gtfsrt_start_dates(*f.d_->tt_, n::source_idx_t{0},
                                               msg, at(now));
-  EXPECT_EQ(1U, stats.dropped_trip_updates_);
-  EXPECT_EQ(1U, stats.cleared_vehicle_trips_);
-  ASSERT_EQ(1, msg.entity_size());
-  EXPECT_TRUE(msg.entity(0).has_vehicle());
-  EXPECT_FALSE(msg.entity(0).vehicle().has_trip());
-  EXPECT_EQ("bus-1", msg.entity(0).vehicle().vehicle().id());
+  EXPECT_EQ(0U, stats.inferred_);
+  EXPECT_EQ(2U, stats.not_operating_);
+  ASSERT_EQ(2, msg.entity_size());
+  EXPECT_FALSE(msg.entity(0).trip_update().trip().has_start_date());
+  EXPECT_TRUE(msg.entity(1).vehicle().has_trip());
 
   // The next evening the same id is the operating run and is kept.
   auto next = feed("NEW");
@@ -190,8 +191,8 @@ TEST(gtfsrt_service_day, explicit_start_date_and_unknown_trips_are_untouched) {
                                           explicit_date, at(now));
   auto const b = infer_gtfsrt_start_dates(*f.d_->tt_, n::source_idx_t{0},
                                           unknown, at(now));
-  EXPECT_EQ(0U, a.inferred_ + a.dropped_trip_updates_ + b.inferred_ +
-                    b.dropped_trip_updates_);
+  EXPECT_EQ(0U, a.inferred_ + a.not_operating_ + b.inferred_ +
+                    b.not_operating_);
   EXPECT_EQ("20190502", explicit_date.entity(0).trip_update().trip().start_date());
   EXPECT_FALSE(unknown.entity(0).trip_update().trip().has_start_date());
   EXPECT_EQ(2, unknown.entity_size());

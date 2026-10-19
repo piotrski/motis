@@ -17,7 +17,7 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 
 - Status: still required
 - Source: `codex/live-vehicles-gps-v6` (PR #52), `src/rt/gtfsrt_service_day.cc`
-- Purpose: TripUpdate and VehiclePosition descriptors without `start_date` get the service day whose scheduled run is closest to the current time before nigiri resolves them. nigiri otherwise uses the UTC date as service date (and the adjacent-day patch above only as a fallback), which put night trips after UTC midnight on the next night's run. Descriptors whose trip id only has runs more than 20 hours away (ZTP Kraków names post-midnight runs with the next service day's trip id at schedule changes) are not attached: the TripUpdate is dropped, the vehicle keeps its position without a trip.
+- Purpose: TripUpdate and VehiclePosition descriptors without `start_date` get the service day whose scheduled run is closest to the current time before nigiri resolves them. nigiri otherwise uses the UTC date as service date (and the adjacent-day patch above only as a fallback), which put night trips after UTC midnight on the next night's run. Descriptors whose trip id only has runs more than 20 hours away (ZTP Kraków names post-midnight runs with the next service day's trip id at schedule changes) are left as sent and logged; mapping them to the run actually operating needs a trip-equivalence rule (open).
 - Tests to run:
   - `motis-test --gtest_filter='gtfsrt_service_day.*'`
 

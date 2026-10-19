@@ -1260,14 +1260,11 @@ void run_rt_update(boost::asio::io_context& ioc,
                           std::chrono::duration_cast<std::chrono::seconds>(
                               now.time_since_epoch())
                               .count());
-                      days.dropped_trip_updates_ != 0U ||
-                      days.cleared_vehicle_trips_ != 0U) {
+                      days.not_operating_ != 0U) {
                     n::log(n::log_lvl::info, "motis.rt",
                            "GTFS-RT service days for tag={}: inferred={}, "
-                           "dropped trip updates={}, cleared vehicle trips={} "
-                           "(trip ids not operating around now)",
-                           g.tag_, days.inferred_, days.dropped_trip_updates_,
-                           days.cleared_vehicle_trips_);
+                           "left as sent={} (trip ids with no run around now)",
+                           g.tag_, days.inferred_, days.not_operating_);
                   }
                   auto const differential =
                       msg.header().incrementality() ==

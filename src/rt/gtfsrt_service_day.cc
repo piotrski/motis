@@ -96,32 +96,19 @@ gtfsrt_service_day_stats infer_gtfsrt_start_dates(
     std::int64_t const now_seconds,
     std::int64_t const max_distance_seconds) {
   auto stats = gtfsrt_service_day_stats{};
-  auto& entities = *msg.mutable_entity();
-  for (auto it = entities.begin(); it != entities.end();) {
-    auto drop = false;
-    if (it->has_trip_update()) {
-      switch (infer(tt, src, *it->mutable_trip_update()->mutable_trip(),
-                    now_seconds, max_distance_seconds)) {
-        case outcome::kInferred: ++stats.inferred_; break;
-        case outcome::kNotOperating:
-          ++stats.dropped_trip_updates_;
-          drop = true;
-          break;
-        case outcome::kUnchanged: break;
-      }
+  auto const count = [&](outcome const o) {
+    stats.inferred_ += o == outcome::kInferred ? 1U : 0U;
+    stats.not_operating_ += o == outcome::kNotOperating ? 1U : 0U;
+  };
+  for (auto& entity : *msg.mutable_entity()) {
+    if (entity.has_trip_update()) {
+      count(infer(tt, src, *entity.mutable_trip_update()->mutable_trip(),
+                  now_seconds, max_distance_seconds));
     }
-    if (!drop && it->has_vehicle() && it->vehicle().has_trip()) {
-      switch (infer(tt, src, *it->mutable_vehicle()->mutable_trip(),
-                    now_seconds, max_distance_seconds)) {
-        case outcome::kInferred: ++stats.inferred_; break;
-        case outcome::kNotOperating:
-          ++stats.cleared_vehicle_trips_;
-          it->mutable_vehicle()->clear_trip();
-          break;
-        case outcome::kUnchanged: break;
-      }
+    if (entity.has_vehicle() && entity.vehicle().has_trip()) {
+      count(infer(tt, src, *entity.mutable_vehicle()->mutable_trip(),
+                  now_seconds, max_distance_seconds));
     }
-    it = drop ? entities.erase(it) : std::next(it);
   }
   return stats;
 }

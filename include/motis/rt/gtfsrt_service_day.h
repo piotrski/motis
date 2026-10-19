@@ -18,8 +18,7 @@ namespace motis {
 
 struct gtfsrt_service_day_stats {
   std::size_t inferred_{};
-  std::size_t dropped_trip_updates_{};
-  std::size_t cleared_vehicle_trips_{};
+  std::size_t not_operating_{};
 };
 
 // GTFS-RT TripDescriptors without start_date are otherwise resolved against
@@ -30,11 +29,12 @@ struct gtfsrt_service_day_stats {
 //
 // For every start_date-less descriptor whose trip_id is known, this picks the
 // service day whose scheduled run is closest to `now` and writes it as
-// start_date. Runs of one trip id repeat every 24 hours, so a run more than
-// `max_distance` away cannot be the one a vehicle is serving or a feed
-// announces ahead: the descriptor names a run that is not operating, its
-// TripUpdate is dropped and its VehiclePosition keeps the vehicle but loses
-// the trip.
+// start_date. Runs of one trip id repeat every 24 hours, so when the closest
+// run is more than `max_distance` away the descriptor names a run that is not
+// operating (ZTP Kraków sends the next service day's trip id for post-midnight
+// runs at schedule changes). Such descriptors are left as sent and counted:
+// dropping them would also hide the vehicles, and mapping them to the run
+// actually operating needs a trip-equivalence rule.
 gtfsrt_service_day_stats infer_gtfsrt_start_dates(
     nigiri::timetable const&,
     nigiri::source_idx_t,
