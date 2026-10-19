@@ -76,8 +76,9 @@ std::optional<resolved_position> resolve_position(
 }
 
 // Last time the previous cycle published for an event the vehicle has now
-// passed, with the source it was shown with. GPS-selected events prefer the
-// interpolated passage the GPS history observed.
+// passed, with the source it was shown with: its selected prediction to the
+// second where one exists, the (minute) timetable time otherwise. GPS-selected
+// events prefer the interpolated passage the GPS history observed.
 std::optional<passed_stop_event> freeze(passed_stop_update_context const& ctx,
                                         resolved_position const& position,
                                         n::stop_idx_t const stop_idx,
@@ -101,6 +102,9 @@ std::optional<passed_stop_event> freeze(passed_stop_update_context const& ctx,
           : ctx.previous_diagnostics_->find_event(run.t_, trip_id, sequence,
                                                   scheduled,
                                                   to_prediction_event(ev));
+  if (diagnostic != nullptr) {
+    time = diagnostic->effective_.predicted_timestamp_seconds_;
+  }
   if (diagnostic != nullptr &&
       diagnostic->effective_.source_ == vehicle_prediction_source::kGps) {
     source = vehicle_prediction_source::kGps;

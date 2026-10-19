@@ -332,7 +332,7 @@ TEST(passed_stops, gps_selected_stop_freezes_observed_passage) {
             .source_ = vehicle_prediction_source::kGps,
             .predicted_timestamp_seconds_ = scheduled_s2 + 60},
         .effective_ = {.source_ = effective,
-                       .predicted_timestamp_seconds_ = scheduled_s2 + 60}};
+                       .predicted_timestamp_seconds_ = scheduled_s2 + 135}};
     return vehicle_prediction_diagnostics_store::build(true, {entry}, now);
   };
   auto candidate = vehicle_prediction_cycle_result{.feed_ = "test",
@@ -359,13 +359,16 @@ TEST(passed_stops, gps_selected_stop_freezes_observed_passage) {
             gps.store_.find(t, 1U, kArr)->time_seconds_);
   EXPECT_EQ("10:06", f.time(gps, kT1, 1U, kArr));
 
-  // Shadow: GPS was only recorded, so the shown provider time is frozen.
+  // Shadow: GPS was only recorded, so the shown provider prediction is
+  // frozen, to the second.
   auto const shadow_store = diagnostics(vehicle_prediction_source::kProvider);
   auto const shadow = f.run(kDay + 10h + 9min, next, &c1, shadow_store.get(),
                             candidates);
   ASSERT_NE(nullptr, shadow.store_.find(t, 1U, kArr));
   EXPECT_EQ(vehicle_prediction_source::kProvider,
             shadow.store_.find(t, 1U, kArr)->source_);
+  EXPECT_EQ(at(kDay + 10h + 7min + 15s),
+            shadow.store_.find(t, 1U, kArr)->time_seconds_);
   EXPECT_EQ("10:07", f.time(shadow, kT1, 1U, kArr));
 }
 
@@ -436,6 +439,10 @@ TEST(passed_stops, trip_response_marks_passed_stops) {
                        {{.seq_ = 3U, .stop_id_ = "s3", .delay_ = 180}},
                        kDay + 10h + 8min),
                   &c1);
+  // A frozen time with seconds is shown to the second.
+  auto const t = f.transport(c2, kT1);
+  c2.store_.events_.at({t, 1U, kDep}).time_seconds_ =
+      at(kDay + 10h + 7min + 20s);
   auto& d = *f.d_;
   d.init_rtt(kDay);
   d.rt_->rtt_ = std::move(c2.rtt_);
@@ -457,6 +464,8 @@ TEST(passed_stops, trip_response_marks_passed_stops) {
   EXPECT_EQ(status::PASSED, s2.arrivalPrediction_->status_);
   EXPECT_EQ(status::PASSED, s2.departurePrediction_->status_);
   EXPECT_EQ("2019-05-01T10:07:00Z", s2.arrivalPrediction_->time_);
+  EXPECT_EQ("2019-05-01T10:07:20Z", s2.departurePrediction_->time_);
+  EXPECT_EQ(140, s2.departurePrediction_->delaySeconds_);
   auto const& s3 = leg.intermediateStops_->at(1);
   EXPECT_FALSE(s3.arrivalPrediction_->status_.has_value());
   EXPECT_EQ(180, s3.arrivalPrediction_->delaySeconds_);
