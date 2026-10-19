@@ -36,6 +36,7 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 - Status: still required
 - Source: `codex/live-vehicles-gps-v6` (PR #52)
 - Purpose: expose identity-safe live vehicle observations and combine bounded GPS, provider, and schedule prediction candidates
+- API: v6 `trip` legs carry `arrivalPrediction` / `departurePrediction` on each stop visit (`from`, `to`, `intermediateStops`), scoped to that leg's run; the block-wide `startPrediction`, `endPrediction` and `intermediateStopEvents` stay for compatibility. `journey_to_response` takes an optional stop-event hook for this, so keep it when rebasing onto upstream.
 - Tests to run:
   - `motis-test --gtest_filter='motis_vehicle_positions.*:vehicle_prediction*.*:trip_progress_projection.*'`
   - `motis-test --gtest_filter='motis.stop_times:motis.trip*:motis_rt_update.*'`
