@@ -382,6 +382,35 @@ export type VertexType = 'NORMAL' | 'BIKESHARE' | 'TRANSIT';
  */
 export type PickupDropoffType = 'NORMAL' | 'NOT_ALLOWED';
 
+export type PredictionSource = 'PROVIDER' | 'GPS' | 'SCHEDULE';
+
+export type PredictionEventType = 'ARRIVAL' | 'DEPARTURE';
+
+export type PredictionContext = 'DIRECT' | 'INCOMING_BLOCK_LEG';
+
+export type SelectedPrediction = {
+    source: PredictionSource;
+    /**
+     * Exact RFC 3339 timestamp with second precision.
+     */
+    time: string;
+    /**
+     * Exact RFC 3339 scheduled timestamp with second precision.
+     */
+    scheduledTime: string;
+    delaySeconds: number;
+    confidence?: number;
+    /**
+     * Exact RFC 3339 candidate reference timestamp.
+     */
+    referenceTime?: string;
+    eventType: PredictionEventType;
+    /**
+     * Present when the prediction carries additional provenance. An absent value is equivalent to DIRECT.
+     */
+    context?: PredictionContext;
+};
+
 export type Place = {
     /**
      * name of the transit stop / PoI / address
@@ -482,6 +511,23 @@ export type Place = {
      * available transport modes for stops
      */
     modes?: Array<Mode>;
+    /**
+     * Selected prediction for the arrival at this stop visit. Present on
+     * v6 trip responses for a transit leg's `to` and `intermediateStops`.
+     * It belongs to the leg (run) this place is part of: at a block's
+     * trip boundary, the previous leg's `to` carries the arrival and the
+     * next leg's `from` carries the departure.
+     *
+     */
+    arrivalPrediction?: SelectedPrediction;
+    /**
+     * Selected prediction for the departure from this stop visit. Present
+     * on v6 trip responses for a transit leg's `from` and
+     * `intermediateStops`. It belongs to the leg (run) this place is part
+     * of.
+     *
+     */
+    departurePrediction?: SelectedPrediction;
 };
 
 /**
@@ -525,35 +571,6 @@ export type Reachable = {
 };
 
 export type StopTimesV6Direction = 'EARLIER' | 'LATER';
-
-export type PredictionSource = 'PROVIDER' | 'GPS' | 'SCHEDULE';
-
-export type PredictionEventType = 'ARRIVAL' | 'DEPARTURE';
-
-export type PredictionContext = 'DIRECT' | 'INCOMING_BLOCK_LEG';
-
-export type SelectedPrediction = {
-    source: PredictionSource;
-    /**
-     * Exact RFC 3339 timestamp with second precision.
-     */
-    time: string;
-    /**
-     * Exact RFC 3339 scheduled timestamp with second precision.
-     */
-    scheduledTime: string;
-    delaySeconds: number;
-    confidence?: number;
-    /**
-     * Exact RFC 3339 candidate reference timestamp.
-     */
-    referenceTime?: string;
-    eventType: PredictionEventType;
-    /**
-     * Present when the prediction carries additional provenance. An absent value is equivalent to DIRECT.
-     */
-    context?: PredictionContext;
-};
 
 export type IncomingLegPrediction = {
     source: PredictionSource;
@@ -1610,6 +1627,13 @@ export type FareTransfer = {
     effectiveFareLegProducts: Array<Array<Array<FareProduct>>>;
 };
 
+/**
+ * Stop event of the whole vehicle block of a v6 trip response. Kept for
+ * compatibility; prefer the per-visit `arrivalPrediction` and
+ * `departurePrediction` of each leg's `from`, `to` and
+ * `intermediateStops`, which are scoped to that leg's run.
+ *
+ */
 export type IntermediateStopEvent = {
     place: Place;
     arrivalPrediction?: SelectedPrediction;

@@ -441,6 +441,58 @@ export const PickupDropoffTypeSchema = {
     enum: ['NORMAL', 'NOT_ALLOWED']
 } as const;
 
+export const PredictionSourceSchema = {
+    type: 'string',
+    enum: ['PROVIDER', 'GPS', 'SCHEDULE']
+} as const;
+
+export const PredictionEventTypeSchema = {
+    type: 'string',
+    enum: ['ARRIVAL', 'DEPARTURE']
+} as const;
+
+export const PredictionContextSchema = {
+    type: 'string',
+    enum: ['DIRECT', 'INCOMING_BLOCK_LEG']
+} as const;
+
+export const SelectedPredictionSchema = {
+    type: 'object',
+    required: ['source', 'time', 'scheduledTime', 'delaySeconds', 'eventType'],
+    properties: {
+        source: {
+            '$ref': '#/components/schemas/PredictionSource'
+        },
+        time: {
+            type: 'string',
+            description: 'Exact RFC 3339 timestamp with second precision.'
+        },
+        scheduledTime: {
+            type: 'string',
+            description: 'Exact RFC 3339 scheduled timestamp with second precision.'
+        },
+        delaySeconds: {
+            type: 'integer',
+            format: 'int64'
+        },
+        confidence: {
+            type: 'number',
+            format: 'double'
+        },
+        referenceTime: {
+            type: 'string',
+            description: 'Exact RFC 3339 candidate reference timestamp.'
+        },
+        eventType: {
+            '$ref': '#/components/schemas/PredictionEventType'
+        },
+        context: {
+            description: 'Present when the prediction carries additional provenance. An absent value is equivalent to DIRECT.',
+            '$ref': '#/components/schemas/PredictionContext'
+        }
+    }
+} as const;
+
 export const PlaceSchema = {
     type: 'object',
     required: ['name', 'lat', 'lon', 'level'],
@@ -557,6 +609,23 @@ Can be missing if neither real-time updates nor the schedule timetable contains 
             items: {
                 '$ref': '#/components/schemas/Mode'
             }
+        },
+        arrivalPrediction: {
+            description: `Selected prediction for the arrival at this stop visit. Present on
+v6 trip responses for a transit leg's \`to\` and \`intermediateStops\`.
+It belongs to the leg (run) this place is part of: at a block's
+trip boundary, the previous leg's \`to\` carries the arrival and the
+next leg's \`from\` carries the departure.
+`,
+            '$ref': '#/components/schemas/SelectedPrediction'
+        },
+        departurePrediction: {
+            description: `Selected prediction for the departure from this stop visit. Present
+on v6 trip responses for a transit leg's \`from\` and
+\`intermediateStops\`. It belongs to the leg (run) this place is part
+of.
+`,
+            '$ref': '#/components/schemas/SelectedPrediction'
         }
     }
 } as const;
@@ -609,58 +678,6 @@ export const ReachableSchema = {
 export const StopTimesV6DirectionSchema = {
     type: 'string',
     enum: ['EARLIER', 'LATER']
-} as const;
-
-export const PredictionSourceSchema = {
-    type: 'string',
-    enum: ['PROVIDER', 'GPS', 'SCHEDULE']
-} as const;
-
-export const PredictionEventTypeSchema = {
-    type: 'string',
-    enum: ['ARRIVAL', 'DEPARTURE']
-} as const;
-
-export const PredictionContextSchema = {
-    type: 'string',
-    enum: ['DIRECT', 'INCOMING_BLOCK_LEG']
-} as const;
-
-export const SelectedPredictionSchema = {
-    type: 'object',
-    required: ['source', 'time', 'scheduledTime', 'delaySeconds', 'eventType'],
-    properties: {
-        source: {
-            '$ref': '#/components/schemas/PredictionSource'
-        },
-        time: {
-            type: 'string',
-            description: 'Exact RFC 3339 timestamp with second precision.'
-        },
-        scheduledTime: {
-            type: 'string',
-            description: 'Exact RFC 3339 scheduled timestamp with second precision.'
-        },
-        delaySeconds: {
-            type: 'integer',
-            format: 'int64'
-        },
-        confidence: {
-            type: 'number',
-            format: 'double'
-        },
-        referenceTime: {
-            type: 'string',
-            description: 'Exact RFC 3339 candidate reference timestamp.'
-        },
-        eventType: {
-            '$ref': '#/components/schemas/PredictionEventType'
-        },
-        context: {
-            description: 'Present when the prediction carries additional provenance. An absent value is equivalent to DIRECT.',
-            '$ref': '#/components/schemas/PredictionContext'
-        }
-    }
 } as const;
 
 export const IncomingLegPredictionSchema = {
@@ -2182,6 +2199,11 @@ and the inner array as OR (you can choose which ticket to buy)
 } as const;
 
 export const IntermediateStopEventSchema = {
+    description: `Stop event of the whole vehicle block of a v6 trip response. Kept for
+compatibility; prefer the per-visit \`arrivalPrediction\` and
+\`departurePrediction\` of each leg's \`from\`, \`to\` and
+\`intermediateStops\`, which are scoped to that leg's run.
+`,
     type: 'object',
     required: ['place'],
     properties: {

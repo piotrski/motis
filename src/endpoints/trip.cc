@@ -61,14 +61,16 @@ openapi::date_time_t date_time(std::int64_t const timestamp_seconds) {
   return result;
 }
 
+// Selected prediction of one event of one stop visit. The run_stop pins the
+// visit (transport + absolute stop index); the event's own trip (which differs
+// for arrival and departure at a block's trip boundary) keys the lookup.
 api::SelectedPrediction selected_prediction(
     n::timetable const& tt,
     tag_lookup const& tags,
-    n::rt::frun const& run,
-    n::stop_idx_t const stop_idx,
+    n::rt::run_stop const& stop,
     n::event_type const event_type,
     vehicle_prediction_diagnostics_store const* const diagnostics) {
-  auto const stop = run[stop_idx];
+  auto const& run = *stop.fr_;
   auto const scheduled = to_seconds(stop.scheduled_time(event_type));
   auto const sequence = static_stop_sequence(
       tt, run.t_.t_idx_, stop.get_trip_idx(event_type), stop.stop_idx_);
@@ -160,6 +162,17 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
   auto const freshness_cutoff =
       vehicle_matching::freshness_cutoff(now, max_age);
 
+  auto const* const diagnostics = rt->vehicle_prediction_diagnostics_.get();
+  auto const attach_stop_prediction = [&](api::Place& place,
+                                          n::rt::run_stop const& stop,
+                                          n::event_type const event_type) {
+    auto prediction =
+        selected_prediction(tt_, tags_, stop, event_type, diagnostics);
+    (event_type == n::event_type::kArr ? place.arrivalPrediction_
+                                       : place.departurePrediction_) =
+        std::move(prediction);
+  };
+
   auto response = journey_to_response(
       w_, l_, pl_, tt_, tags_, canonical_stop_registry_, nullptr, nullptr, rtt,
       matches_, nullptr, shapes_, gbfs_rd, ae_, tz_,
@@ -181,7 +194,9 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
       api::ElevationCostsEnum::NONE, query.joinInterlinedLegs_, true,
       query.detailedLegs_, false, query.withScheduledSkippedStops_,
       config_.timetable_.value().max_matching_distance_, kMaxMatchingDistance,
-      api_version, false, false, query.language_, nullptr);
+      api_version, false, false, query.language_, nullptr, 0U,
+      api_version >= 6 ? transit_stop_event_hook_t{attach_stop_prediction}
+                       : transit_stop_event_hook_t{});
   if (rt->vehicle_positions_ != nullptr && !response.legs_.empty()) {
     auto const leg = query.joinInterlinedLegs_
                          ? begin(response.legs_)
@@ -196,8 +211,8 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
   if (api_version >= 6) {
     auto const prediction = [&](n::stop_idx_t const stop_idx,
                                 n::event_type const event_type) {
-      return selected_prediction(tt_, tags_, fr, stop_idx, event_type,
-                                 rt->vehicle_prediction_diagnostics_.get());
+      return selected_prediction(tt_, tags_, fr[stop_idx], event_type,
+                                 diagnostics);
     };
     response.startPrediction_ = prediction(0U, n::event_type::kDep);
     response.endPrediction_ = prediction(
@@ -219,8 +234,8 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
            .departurePrediction_ = prediction(i, n::event_type::kDep)});
     }
     response.intermediateStopEvents_ = std::move(intermediate);
-    response.incomingLegPrediction_ = incoming_leg_prediction(
-        fr.t_, requested_trip_id, rt->vehicle_prediction_diagnostics_.get());
+    response.incomingLegPrediction_ =
+        incoming_leg_prediction(fr.t_, requested_trip_id, diagnostics);
   }
   return response;
 }
