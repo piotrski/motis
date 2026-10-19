@@ -52,6 +52,7 @@
 #include "motis/http_req.h"
 #include "motis/railviz.h"
 #include "motis/rt/auser.h"
+#include "motis/rt/gtfsrt_service_day.h"
 #include "motis/rt/passed_stops.h"
 #include "motis/rt/rt_metrics.h"
 #include "motis/rt/trip_progress_diagnostics.h"
@@ -1254,6 +1255,20 @@ void run_rt_update(boost::asio::io_context& ioc,
                 [&](std::size_t const endpoint_idx, gtfs_rt_endpoint const& g,
                     std::string_view const body) {
                   auto msg = validate_gtfsrt_payload(body);
+                  if (auto const days = infer_gtfsrt_start_dates(
+                          *d.tt_, g.src_, msg,
+                          std::chrono::duration_cast<std::chrono::seconds>(
+                              now.time_since_epoch())
+                              .count());
+                      days.dropped_trip_updates_ != 0U ||
+                      days.cleared_vehicle_trips_ != 0U) {
+                    n::log(n::log_lvl::info, "motis.rt",
+                           "GTFS-RT service days for tag={}: inferred={}, "
+                           "dropped trip updates={}, cleared vehicle trips={} "
+                           "(trip ids not operating around now)",
+                           g.tag_, days.inferred_, days.dropped_trip_updates_,
+                           days.cleared_vehicle_trips_);
+                  }
                   auto const differential =
                       msg.header().incrementality() ==
                       transit_realtime::FeedHeader_Incrementality_DIFFERENTIAL;
