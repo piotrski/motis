@@ -362,14 +362,15 @@ TEST(passed_stops, gps_selected_stop_freezes_observed_passage) {
   EXPECT_EQ("10:06", f.time(gps, kT1, 1U, kArr));
 
   // Shadow: GPS was only recorded, so the shown provider prediction is
-  // frozen, to the second.
+  // frozen. Its 10:07:15 arrival is kept no later than the departure, which
+  // was shown at its timetable minute (10:07:00).
   auto const shadow_store = diagnostics(vehicle_prediction_source::kProvider);
   auto const shadow = f.run(kDay + 10h + 9min, next, &c1, shadow_store.get(),
                             candidates);
   ASSERT_NE(nullptr, shadow.store_.find(t, 1U, kArr));
   EXPECT_EQ(vehicle_prediction_source::kProvider,
             shadow.store_.find(t, 1U, kArr)->source_);
-  EXPECT_EQ(at(kDay + 10h + 7min + 15s),
+  EXPECT_EQ(at(kDay + 10h + 7min),
             shadow.store_.find(t, 1U, kArr)->time_seconds_);
   EXPECT_EQ("10:07", f.time(shadow, kT1, 1U, kArr));
 }
@@ -656,4 +657,51 @@ TEST(passed_stops, clamped_passed_time_does_not_move_back_later) {
   auto const t = f.transport(c3, kT1);
   ASSERT_NE(nullptr, c3.store_.find(t, 1U, kArr));
   EXPECT_EQ(at(kDay + 10h + 7min), c3.store_.find(t, 1U, kArr)->time_seconds_);
+}
+
+TEST(passed_stops, frozen_seconds_keep_chronology_with_next_event) {
+  // s2 was predicted 10:07:50, but the bus reaches s3 at 10:07:20 (shown
+  // as 10:07:00 from the minute timetable): the passed s2 must not be
+  // rendered after s3.
+  auto f = fixture{"test/passed-stops-seconds-chronology"};
+  auto c1 = f.run(
+      kDay + 10h + 4min,
+      feed("T1", "10:00:00", {{.seq_ = 2U, .delay_ = 120}}, kDay + 10h + 4min),
+      nullptr);
+  auto const t = f.transport(c1, kT1);
+  auto entries = std::vector<vehicle_prediction_diagnostic_entry>{};
+  for (auto const ev : {vehicle_prediction_event_type::kArrival,
+                        vehicle_prediction_event_type::kDeparture}) {
+    entries.push_back(
+        {.transport_ = t,
+         .static_stop_sequence_ = 2U,
+         .event_type_ = ev,
+         .trip_id_ = kT1,
+         .observed_at_seconds_ = at(kDay + 10h + 4min),
+         .scheduled_timestamp_seconds_ = at(kDay + 10h + 5min),
+         .effective_ = {
+             .source_ = vehicle_prediction_source::kProvider,
+             .predicted_timestamp_seconds_ = at(kDay + 10h + 7min + 50s)}});
+  }
+  auto const prev = vehicle_prediction_diagnostics_store::build(
+      true, entries, at(kDay + 10h + 4min));
+  auto c2 = f.run(
+      kDay + 10h + 9min,
+      feed("T1", "10:00:00", {{.seq_ = 3U, .time_ = kDay + 10h + 7min + 20s}},
+           kDay + 10h + 9min),
+      &c1, prev.get());
+  auto& d = *f.d_;
+  d.init_rtt(kDay);
+  d.rt_->rtt_ = std::move(c2.rtt_);
+  d.rt_->passed_stops_ =
+      std::make_unique<passed_stop_store>(std::move(c2.store_));
+  auto const trip_ep = utl::init_from<ep::trip>(d).value();
+  auto const res = trip_ep("/api/v6/trip?tripId=20190501_10%3A00_test_T1");
+  auto const& stops = *res.legs_.front().intermediateStops_;
+  EXPECT_LE(stops[0].departurePrediction_->time_,
+            stops[1].arrivalPrediction_->time_);
+  EXPECT_EQ("2019-05-01T10:07:00Z", stops[0].arrivalPrediction_->time_);
+  EXPECT_EQ("2019-05-01T10:07:00Z", stops[0].departurePrediction_->time_);
+  EXPECT_EQ(api::PredictionStatusEnum::PASSED,
+            stops[0].departurePrediction_->status_);
 }

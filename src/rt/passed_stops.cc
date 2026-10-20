@@ -166,16 +166,17 @@ std::optional<passed_stop_event> freeze(passed_stop_update_context const& ctx,
                            .frozen_at_seconds_ = ctx.now_seconds_};
 }
 
-// GPS time the overlay is about to render for the vehicle's next event, so
-// passed events can be kept before it and the overlay's chronology check
-// still accepts the transport.
-std::optional<n::unixtime_t> overlay_time(passed_stop_update_context const& ctx,
-                                          resolved_position const& position,
-                                          n::stop_idx_t const stop_idx,
-                                          n::event_type const ev) {
+// Exact GPS time selected for the vehicle's next event: the endpoints show it
+// to the second and the overlay renders it no earlier than its minute, so
+// passed events kept before it stay before it in both.
+std::optional<std::int64_t> overlay_seconds(
+    passed_stop_update_context const& ctx,
+    resolved_position const& position,
+    n::stop_idx_t const stop_idx,
+    n::event_type const ev) {
   auto const sequence =
       position.sequences_[stop_idx - position.run_.stop_range_.from_];
-  auto result = std::optional<n::unixtime_t>{};
+  auto result = std::optional<std::int64_t>{};
   for (auto const& overlay : ctx.overlays_) {
     // Stop sequences repeat across the trips of a block: only the passed
     // trip's own overlay bounds it.
@@ -187,7 +188,7 @@ std::optional<n::unixtime_t> overlay_time(passed_stop_update_context const& ctx,
     for (auto const& prediction : overlay.predictions_) {
       if (prediction.static_stop_sequence_ == sequence &&
           prediction.event_type_ == to_prediction_event(ev)) {
-        auto const t = to_unixtime(prediction.predicted_timestamp_seconds_);
+        auto const t = prediction.predicted_timestamp_seconds_;
         result = result.has_value() ? std::min(*result, t) : t;
       }
     }
@@ -211,13 +212,18 @@ void apply(passed_stop_update_context const& ctx,
                        time - ctx.tt_.event_time(run.t_, stop_idx, ev));
   };
 
-  // Walk back from the vehicle's next event over the whole transport: each
-  // passed event takes its frozen time, and no event may run later than the
-  // one after it. A clamped frozen time is kept as clamped, so a later delay
-  // at the next stop cannot move a passed event back.
+  // Walk back from the vehicle's next event over the whole transport, to the
+  // second: each passed event takes its frozen time and no event may run
+  // later than the one after it, as the endpoints render them. The next
+  // event renders no earlier than its timetable minute or its exact GPS time.
+  // Frozen events render their stored seconds, which keep the clamped value
+  // (a passed event only ever moves earlier); other events render their
+  // timetable minute.
   auto const next = position.first_covered_;
-  auto bound = rtt.unix_event_time(rt_transport, next, n::event_type::kArr);
-  if (auto const gps = overlay_time(ctx, position, next, n::event_type::kArr);
+  auto bound =
+      to_seconds(rtt.unix_event_time(rt_transport, next, n::event_type::kArr));
+  if (auto const gps =
+          overlay_seconds(ctx, position, next, n::event_type::kArr);
       gps.has_value()) {
     bound = std::min(bound, *gps);
   }
@@ -228,16 +234,15 @@ void apply(passed_stop_update_context const& ctx,
         continue;
       }
       auto const frozen = store.events_.find(event_key{run.t_, idx, ev});
-      auto const is_frozen = frozen != end(store.events_);
-      auto const time =
-          std::min(is_frozen ? to_unixtime(frozen->second.time_seconds_)
-                             : rtt.unix_event_time(rt_transport, idx, ev),
-                   bound);
-      if (is_frozen && time < to_unixtime(frozen->second.time_seconds_)) {
-        frozen->second.time_seconds_ = to_seconds(time);
+      if (frozen != end(store.events_)) {
+        frozen->second.time_seconds_ =
+            std::min(frozen->second.time_seconds_, bound);
+        bound = frozen->second.time_seconds_;
+      } else {
+        bound = to_seconds(to_unixtime(std::min(
+            to_seconds(rtt.unix_event_time(rt_transport, idx, ev)), bound)));
       }
-      write(idx, ev, time);
-      bound = time;
+      write(idx, ev, to_unixtime(bound));
     }
   }
 }

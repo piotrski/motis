@@ -243,12 +243,9 @@ api::SelectedPrediction selected_prediction(
               ? nullptr
               : passed_stops->find(stop.fr_->t_, stop.stop_idx_, event_type);
       passed != nullptr) {
-    // The timetable holds minutes; keep the frozen seconds unless the
-    // chronology clamp moved the event to another minute.
-    auto const shown = to_seconds(stop.time(event_type));
-    auto const time = shown / 60 == passed->time_seconds_ / 60
-                          ? passed->time_seconds_
-                          : shown;
+    // Frozen times are final to the second: the realtime cycle already kept
+    // them in order with the events around them.
+    auto const time = passed->time_seconds_;
     return {.source_ = to_api(passed->source_),
             .time_ = rfc3339(time),
             .scheduledTime_ = rfc3339(scheduled),
