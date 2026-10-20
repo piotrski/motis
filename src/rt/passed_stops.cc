@@ -75,10 +75,20 @@ std::optional<resolved_position> resolve_position(
   return std::nullopt;
 }
 
-// Last time the previous cycle published for an event the vehicle has now
-// passed, with the source it was shown with: its selected prediction to the
-// second where one exists, the (minute) timetable time otherwise. GPS-selected
-// events prefer the interpolated passage the GPS history observed.
+bool gps_overlay_selected(passed_stop_update_context const& ctx,
+                          n::rt::run const& run) {
+  return std::ranges::any_of(ctx.overlays_, [&](auto const& overlay) {
+    return overlay.transport_ == run.t_ &&
+           (!overlay.trip_stop_range_.has_value() ||
+            *overlay.trip_stop_range_ == run.stop_range_);
+  });
+}
+
+// What the previous cycle published for an event the vehicle has now passed:
+// the same selection the endpoints show (GPS, provider or schedule, to the
+// second where a selected prediction exists). While GPS is selected for the
+// vehicle, the passage its history observed wins, so a one-cycle GPS gap at
+// the stop does not freeze a schedule fallback.
 std::optional<passed_stop_event> freeze(passed_stop_update_context const& ctx,
                                         resolved_position const& position,
                                         n::stop_idx_t const stop_idx,
@@ -92,22 +102,21 @@ std::optional<passed_stop_event> freeze(passed_stop_update_context const& ctx,
   }
   auto const sequence = position.sequences_[stop_idx - run.stop_range_.from_];
   auto const scheduled = to_seconds(ctx.tt_.event_time(run.t_, stop_idx, ev));
-  auto time = to_seconds(
-      ctx.previous_rtt_->unix_event_time(previous_rt, stop_idx, ev));
-  auto source = vehicle_prediction_source::kProvider;
-
   auto const* diagnostic =
       ctx.previous_diagnostics_ == nullptr
           ? nullptr
           : ctx.previous_diagnostics_->find_event(run.t_, trip_id, sequence,
                                                   scheduled,
                                                   to_prediction_event(ev));
-  if (diagnostic != nullptr) {
-    time = diagnostic->effective_.predicted_timestamp_seconds_;
-  }
-  if (diagnostic != nullptr &&
-      diagnostic->effective_.source_ == vehicle_prediction_source::kGps) {
-    source = vehicle_prediction_source::kGps;
+  auto const shown = resolve_effective_prediction(
+      true, scheduled,
+      to_seconds(ctx.previous_rtt_->unix_event_time(previous_rt, stop_idx, ev)),
+      diagnostic);
+  auto time = shown.predicted_timestamp_seconds_;
+  auto source = shown.source_;
+
+  if (shown.source_ == vehicle_prediction_source::kGps ||
+      gps_overlay_selected(ctx, run)) {
     for (auto const& candidate : ctx.candidates_) {
       if (candidate.batch_.transport_ != run.t_ ||
           candidate.trip_stop_range_ != run.stop_range_) {
@@ -118,6 +127,7 @@ std::optional<passed_stop_event> freeze(passed_stop_update_context const& ctx,
           &observed_stop_passage::static_stop_sequence_);
       if (passage != end(candidate.batch_.observed_passages_)) {
         time = passage->observed_timestamp_seconds_;
+        source = vehicle_prediction_source::kGps;
       }
     }
   }

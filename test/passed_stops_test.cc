@@ -372,6 +372,53 @@ TEST(passed_stops, gps_selected_stop_freezes_observed_passage) {
   EXPECT_EQ("10:07", f.time(shadow, kT1, 1U, kArr));
 }
 
+TEST(passed_stops, freeze_keeps_shown_source_and_prefers_gps_passage) {
+  auto f = fixture{"test/passed-stops-shown-source"};
+  // On time at s2: nothing but the schedule was shown for it.
+  auto const c1 = f.run(kDay + 10h + 4min,
+                        feed("T1", "10:00:00",
+                             {{.seq_ = 2U, .stop_id_ = "s2", .delay_ = 0}},
+                             kDay + 10h + 4min),
+                        nullptr);
+  auto const t = f.transport(c1, kT1);
+  auto const next = feed("T1", "10:00:00",
+                         {{.seq_ = 3U, .stop_id_ = "s3", .delay_ = 60}},
+                         kDay + 10h + 9min);
+  auto const plain = f.run(kDay + 10h + 9min, next, &c1);
+  ASSERT_NE(nullptr, plain.store_.find(t, 1U, kArr));
+  EXPECT_EQ(vehicle_prediction_source::kSchedule,
+            plain.store_.find(t, 1U, kArr)->source_);
+
+  // GPS is selected for the vehicle this cycle (it has an overlay) and its
+  // history observed the passage: a one-cycle schedule fallback at the stop
+  // does not get frozen.
+  auto candidate = vehicle_prediction_cycle_result{.feed_ = "test",
+                                                   .trip_id_ = kT1};
+  candidate.trip_stop_range_ = n::interval<n::stop_idx_t>{0U, 4U};
+  candidate.batch_.transport_ = t;
+  candidate.batch_.observed_passages_ = {
+      {.static_stop_sequence_ = 2U,
+       .observed_timestamp_seconds_ = at(kDay + 10h + 6min + 40s),
+       .uncertainty_seconds_ = 15}};
+  auto const candidates = std::vector{candidate};
+  auto const overlays = std::vector{selected_vehicle_prediction_trip{
+      .transport_ = t,
+      .source_ = n::source_idx_t{0},
+      .trip_stop_range_ = n::interval<n::stop_idx_t>{0U, 4U},
+      .predictions_ = {{.static_stop_sequence_ = 3U,
+                        .event_type_ = vehicle_prediction_event_type::kArrival,
+                        .scheduled_timestamp_seconds_ = at(kDay + 10h + 10min),
+                        .predicted_timestamp_seconds_ = at(kDay + 10h + 11min),
+                        .delay_seconds_ = 60}}}};
+  auto const gps =
+      f.run(kDay + 10h + 9min, next, &c1, nullptr, candidates, overlays);
+  ASSERT_NE(nullptr, gps.store_.find(t, 1U, kArr));
+  EXPECT_EQ(vehicle_prediction_source::kGps,
+            gps.store_.find(t, 1U, kArr)->source_);
+  EXPECT_EQ(at(kDay + 10h + 6min + 40s),
+            gps.store_.find(t, 1U, kArr)->time_seconds_);
+}
+
 TEST(passed_stops, passed_events_stay_before_gps_overlay) {
   auto f = fixture{"test/passed-stops-overlay"};
   auto const c1 = f.run(kDay + 10h + 4min,
