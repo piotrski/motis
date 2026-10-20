@@ -241,7 +241,7 @@ api::SelectedPrediction selected_prediction(
   if (auto const* passed =
           passed_stops == nullptr
               ? nullptr
-              : passed_stops->find(run.t_, stop.stop_idx_, event_type);
+              : passed_stops->find(stop.fr_->t_, stop.stop_idx_, event_type);
       passed != nullptr) {
     // The timetable holds minutes; keep the frozen seconds unless the
     // chronology clamp moved the event to another minute.

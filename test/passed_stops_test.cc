@@ -23,6 +23,7 @@
 
 #include "motis/config.h"
 #include "motis/data.h"
+#include "motis/endpoints/stop_times.h"
 #include "motis/endpoints/trip.h"
 #include "motis/import.h"
 #include "motis/rt/passed_stops.h"
@@ -553,4 +554,52 @@ TEST(passed_stops, malformed_entity_does_not_stop_other_trips) {
   auto const t = f.transport(c2, kT1);
   ASSERT_NE(nullptr, c2.store_.find(t, 1U, kArr));
   EXPECT_EQ("10:07", f.time(c2, kT1, 1U, kArr));
+}
+
+TEST(passed_stops, stoptimes_marks_passed_events_of_realtime_runs) {
+  // The stop time iterator hands out realtime runs without the static
+  // transport; the passed-stop lookup must use the resolved one.
+  auto f = fixture{"test/passed-stops-stoptimes"};
+  auto c1 = f.run(
+      kDay + 10h + 4min,
+      feed("T1", "10:00:00", {{.seq_ = 2U, .delay_ = 120}}, kDay + 10h + 4min),
+      nullptr);
+  auto const t = f.transport(c1, kT1);
+  auto entries = std::vector<vehicle_prediction_diagnostic_entry>{
+      {.transport_ = t,
+       .static_stop_sequence_ = 2U,
+       .event_type_ = vehicle_prediction_event_type::kDeparture,
+       .trip_id_ = kT1,
+       .observed_at_seconds_ = at(kDay + 10h + 4min),
+       .scheduled_timestamp_seconds_ = at(kDay + 10h + 5min),
+       .effective_ = {
+           .source_ = vehicle_prediction_source::kProvider,
+           .predicted_timestamp_seconds_ = at(kDay + 10h + 7min + 50s)}}};
+  auto const prev = vehicle_prediction_diagnostics_store::build(
+      true, entries, at(kDay + 10h + 4min));
+  auto c2 = f.run(
+      kDay + 10h + 9min,
+      feed("T1", "10:00:00", {{.seq_ = 3U, .delay_ = 180}}, kDay + 10h + 9min),
+      &c1, prev.get());
+  auto& d = *f.d_;
+  d.init_rtt(kDay);
+  d.rt_->rtt_ = std::move(c2.rtt_);
+  d.rt_->passed_stops_ =
+      std::make_unique<passed_stop_store>(std::move(c2.store_));
+  ASSERT_NE(nullptr, d.rt_->passed_stops_->find(t, 1U, kDep));
+  EXPECT_EQ(at(kDay + 10h + 7min + 50s),
+            d.rt_->passed_stops_->find(t, 1U, kDep)->time_seconds_);
+  auto const ep = utl::init_from<ep::stop_times>(d).value();
+  auto const before =
+      ep("/api/v6/stoptimes?stopId=test_s2&time=2019-05-01T10:07:00Z&n=1");
+  ASSERT_EQ(1U, before.stopTimes_.size());
+  EXPECT_EQ(kT1, before.stopTimes_[0].tripId_);
+  EXPECT_EQ(api::PredictionStatusEnum::PASSED,
+            before.stopTimes_[0].selectedPrediction_->status_);
+  EXPECT_EQ("2019-05-01T10:07:50Z",
+            before.stopTimes_[0].selectedPrediction_->time_);
+  auto const after =
+      ep("/api/v6/stoptimes?stopId=test_s2&time=2019-05-01T10:07:30Z&n=1");
+  ASSERT_EQ(1U, after.stopTimes_.size());
+  EXPECT_EQ(kT1, after.stopTimes_[0].tripId_);
 }
