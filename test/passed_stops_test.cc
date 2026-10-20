@@ -391,11 +391,18 @@ TEST(passed_stops, passed_events_stay_before_gps_overlay) {
                         .predicted_timestamp_seconds_ =
                             at(kDay + 10h + 8min + 20s),
                         .delay_seconds_ = -100}}}};
+  // An overlay of another trip on the same transport with the same stop
+  // sequence (a later trip of the block) does not bound this trip.
+  auto other_trip = overlays.front();
+  other_trip.trip_stop_range_ = n::interval<n::stop_idx_t>{4U, 8U};
+  other_trip.predictions_.front().predicted_timestamp_seconds_ =
+      at(kDay + 10h + 1min);
+  auto const with_other = std::vector{overlays.front(), other_trip};
   auto const c2 = f.run(kDay + 10h + 10min,
                         feed("T1", "10:00:00",
                              {{.seq_ = 3U, .stop_id_ = "s3", .delay_ = 240}},
                              kDay + 10h + 10min),
-                        &c1, nullptr, {}, overlays);
+                        &c1, nullptr, {}, with_other);
   EXPECT_EQ("10:14", f.time(c2, kT1, 2U, kArr));  // overlay not applied here
   EXPECT_EQ("10:08", f.time(c2, kT1, 1U, kDep));
   EXPECT_EQ("10:08", f.time(c2, kT1, 1U, kArr));

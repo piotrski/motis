@@ -137,7 +137,11 @@ std::optional<n::unixtime_t> overlay_time(passed_stop_update_context const& ctx,
       position.sequences_[stop_idx - position.run_.stop_range_.from_];
   auto result = std::optional<n::unixtime_t>{};
   for (auto const& overlay : ctx.overlays_) {
-    if (overlay.transport_ != position.run_.t_) {
+    // Stop sequences repeat across the trips of a block: only the passed
+    // trip's own overlay bounds it.
+    if (overlay.transport_ != position.run_.t_ ||
+        (overlay.trip_stop_range_.has_value() &&
+         *overlay.trip_stop_range_ != position.run_.stop_range_)) {
       continue;
     }
     for (auto const& prediction : overlay.predictions_) {
