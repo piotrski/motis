@@ -634,3 +634,26 @@ TEST(passed_stops, repeated_stop_id_keeps_passed_visits) {
   EXPECT_EQ("10:02", f.time(c3, kT1, 0U, kDep));
   EXPECT_EQ("10:07", f.time(c3, kT1, 1U, kArr));
 }
+
+TEST(passed_stops, clamped_passed_time_does_not_move_back_later) {
+  // Clamped to 10:07 when the bus was reported 3 min early at s3; a later
+  // cycle with a growing delay at s3 must not move the passed s2 back.
+  auto f = fixture{"test/passed-stops-clamp-persists"};
+  auto c1 = f.run(
+      kDay + 10h + 4min,
+      feed("T1", "10:00:00", {{.seq_ = 2U, .delay_ = 300}}, kDay + 10h + 4min),
+      nullptr);
+  auto c2 = f.run(kDay + 10h + 12min,
+                  feed("T1", "10:00:00", {{.seq_ = 3U, .delay_ = -180}},
+                       kDay + 10h + 12min),
+                  &c1);
+  auto c3 = f.run(
+      kDay + 10h + 13min,
+      feed("T1", "10:00:00", {{.seq_ = 3U, .delay_ = 300}}, kDay + 10h + 13min),
+      &c2);
+  EXPECT_EQ("10:07", f.time(c2, kT1, 1U, kArr));
+  EXPECT_EQ(f.time(c2, kT1, 1U, kArr), f.time(c3, kT1, 1U, kArr));
+  auto const t = f.transport(c3, kT1);
+  ASSERT_NE(nullptr, c3.store_.find(t, 1U, kArr));
+  EXPECT_EQ(at(kDay + 10h + 7min), c3.store_.find(t, 1U, kArr)->time_seconds_);
+}

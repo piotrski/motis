@@ -198,7 +198,7 @@ std::optional<n::unixtime_t> overlay_time(passed_stop_update_context const& ctx,
 void apply(passed_stop_update_context const& ctx,
            n::rt_timetable& rtt,
            resolved_position const& position,
-           passed_stop_store const& store) {
+           passed_stop_store& store) {
   auto const& run = position.run_;
   auto const rt_transport = rtt.resolve_rt(run.t_);
   auto const write = [&](n::stop_idx_t const stop_idx, n::event_type const ev,
@@ -213,7 +213,8 @@ void apply(passed_stop_update_context const& ctx,
 
   // Walk back from the vehicle's next event over the whole transport: each
   // passed event takes its frozen time, and no event may run later than the
-  // one after it.
+  // one after it. A clamped frozen time is kept as clamped, so a later delay
+  // at the next stop cannot move a passed event back.
   auto const next = position.first_covered_;
   auto bound = rtt.unix_event_time(rt_transport, next, n::event_type::kArr);
   if (auto const gps = overlay_time(ctx, position, next, n::event_type::kArr);
@@ -226,11 +227,15 @@ void apply(passed_stop_update_context const& ctx,
       if (ev == n::event_type::kArr && idx == 0U) {
         continue;
       }
-      auto const* frozen = store.find(run.t_, idx, ev);
+      auto const frozen = store.events_.find(event_key{run.t_, idx, ev});
+      auto const is_frozen = frozen != end(store.events_);
       auto const time =
-          std::min(frozen != nullptr ? to_unixtime(frozen->time_seconds_)
-                                     : rtt.unix_event_time(rt_transport, idx, ev),
+          std::min(is_frozen ? to_unixtime(frozen->second.time_seconds_)
+                             : rtt.unix_event_time(rt_transport, idx, ev),
                    bound);
+      if (is_frozen && time < to_unixtime(frozen->second.time_seconds_)) {
+        frozen->second.time_seconds_ = to_seconds(time);
+      }
       write(idx, ev, time);
       bound = time;
     }
