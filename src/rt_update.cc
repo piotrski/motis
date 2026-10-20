@@ -2236,19 +2236,27 @@ void run_rt_update(boost::asio::io_context& ioc,
             // otherwise drop passed stops back to the schedule on every
             // rebuild. Freeze them into the provider baseline, after the GPS
             // selection so they stay before the overlay's next event.
-            auto passed_stops = std::make_unique<passed_stop_store>(
-                update_passed_stops(
-                    {.tt_ = *d.tt_,
-                     .tags_ = *d.tags_,
-                     .today_ = today,
-                     .now_seconds_ = cycle_now,
-                     .previous_ = published_rt->passed_stops_.get(),
-                     .previous_rtt_ = published_rt->rtt_.get(),
-                     .previous_diagnostics_ =
-                         published_rt->vehicle_prediction_diagnostics_.get(),
-                     .candidates_ = prediction_candidates,
-                     .overlays_ = selected_overlays},
-                    *rtt, trip_positions));
+            auto passed_stops = std::make_unique<passed_stop_store>();
+            try {
+              *passed_stops = update_passed_stops(
+                  {.tt_ = *d.tt_,
+                   .tags_ = *d.tags_,
+                   .today_ = today,
+                   .now_seconds_ = cycle_now,
+                   .previous_ = published_rt->passed_stops_.get(),
+                   .previous_rtt_ = published_rt->rtt_.get(),
+                   .previous_diagnostics_ =
+                       published_rt->vehicle_prediction_diagnostics_.get(),
+                   .candidates_ = prediction_candidates,
+                   .overlays_ = selected_overlays},
+                  *rtt, trip_positions);
+            } catch (std::exception const& e) {
+              // Passed stops are a refinement: publish the cycle without them
+              // rather than not at all.
+              n::log(n::log_lvl::error, "motis.rt",
+                     "PASSED STOPS ERROR: error={}", e.what());
+              *passed_stops = passed_stop_store{};
+            }
 
             auto const timetable_clone_started =
                 std::chrono::steady_clock::now();

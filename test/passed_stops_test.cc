@@ -527,3 +527,30 @@ TEST(passed_stops, trip_response_marks_passed_stops) {
   ASSERT_TRUE(res.startPrediction_.has_value());
   EXPECT_EQ(status::PASSED, res.startPrediction_->status_);
 }
+
+TEST(passed_stops, malformed_entity_does_not_stop_other_trips) {
+  auto f = fixture{"test/passed-stops-bad-entity"};
+  // A route-only descriptor without the start date and time nigiri needs to
+  // resolve it: nigiri skips it when applying the feed, and so must the
+  // passed-stop update, without affecting the healthy entity next to it.
+  auto const with_bad_entity = [](transit_realtime::FeedMessage msg) {
+    auto* const bad = msg.add_entity();
+    bad->set_id("unsupported-route-only");
+    bad->mutable_trip_update()->mutable_trip()->set_route_id("R1");
+    bad->mutable_trip_update()->add_stop_time_update()->set_stop_sequence(1U);
+    return msg;
+  };
+  auto const c1 = f.run(
+      kDay + 10h + 4min,
+      with_bad_entity(feed("T1", "10:00:00", {{.seq_ = 2U, .delay_ = 120}},
+                           kDay + 10h + 4min)),
+      nullptr);
+  auto const c2 = f.run(
+      kDay + 10h + 8min,
+      with_bad_entity(feed("T1", "10:00:00", {{.seq_ = 3U, .delay_ = 180}},
+                           kDay + 10h + 8min)),
+      &c1);
+  auto const t = f.transport(c2, kT1);
+  ASSERT_NE(nullptr, c2.store_.find(t, 1U, kArr));
+  EXPECT_EQ("10:07", f.time(c2, kT1, 1U, kArr));
+}

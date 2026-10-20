@@ -4,6 +4,7 @@
 #include <chrono>
 
 #include "nigiri/loader/gtfs/stop_seq_number_encoding.h"
+#include "nigiri/logging.h"
 #include "nigiri/rt/frun.h"
 #include "nigiri/rt/gtfsrt_resolve_run.h"
 #include "nigiri/rt/rt_timetable.h"
@@ -228,6 +229,12 @@ std::vector<trip_update_position> trip_update_positions(
         transit_realtime::TripDescriptor_ScheduleRelationship_SCHEDULED) {
       continue;
     }
+    auto const& td = update.trip();
+    if (!td.has_trip_id() &&
+        !(td.has_route_id() && td.has_direction_id() && td.has_start_date() &&
+          td.has_start_time())) {
+      continue;  // nigiri cannot resolve it either
+    }
     auto const& first = update.stop_time_update(0);
     if (!first.has_stop_sequence() && !first.has_stop_id()) {
       continue;
@@ -263,8 +270,18 @@ passed_stop_store update_passed_stops(
     std::span<trip_update_position const> const positions) {
   auto store = passed_stop_store{};
   auto resolved = std::vector<resolved_position>{};
+  auto unresolvable = std::size_t{0U};
   for (auto const& position : positions) {
-    auto r = resolve_position(ctx, rtt, position);
+    // nigiri skips descriptors it cannot resolve (e.g. route-only without
+    // start date and time) when applying the feed; one of them must not cost
+    // the other trips their passed stops, nor the cycle its publication.
+    auto r = std::optional<resolved_position>{};
+    try {
+      r = resolve_position(ctx, rtt, position);
+    } catch (std::exception const&) {
+      ++unresolvable;
+      continue;
+    }
     if (!r.has_value()) {
       continue;
     }
@@ -317,6 +334,11 @@ passed_stop_store update_passed_stops(
     if (position.first_covered_ != position.run_.stop_range_.from_) {
       apply(ctx, rtt, position, store);
     }
+  }
+  if (unresolvable != 0U) {
+    n::log(n::log_lvl::debug, "motis.rt",
+           "passed stops: skipped {} unresolvable trip descriptors",
+           unresolvable);
   }
   return store;
 }
