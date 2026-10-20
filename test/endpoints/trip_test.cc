@@ -867,6 +867,151 @@ TEST(motis, trip_stop_predictions_follow_effective_selection) {
   expect_leg_predictions(loop_leg(), 180, source::PROVIDER);
 }
 
+namespace {
+
+void expect_same_prediction(std::optional<api::SelectedPrediction> const& a,
+                            std::optional<api::SelectedPrediction> const& b,
+                            std::string_view const where) {
+  SCOPED_TRACE(where);
+  ASSERT_EQ(a.has_value(), b.has_value());
+  if (!a.has_value()) {
+    return;
+  }
+  EXPECT_EQ(a->source_, b->source_);
+  EXPECT_EQ(a->time_, b->time_);
+  EXPECT_EQ(a->scheduledTime_, b->scheduledTime_);
+  EXPECT_EQ(a->delaySeconds_, b->delaySeconds_);
+  EXPECT_EQ(a->eventType_, b->eventType_);
+  EXPECT_EQ(a->status_, b->status_);
+}
+
+void expect_same_visits(api::Leg const& a, api::Leg const& b) {
+  SCOPED_TRACE(a.tripId_.value_or(""));
+  EXPECT_EQ(a.tripId_, b.tripId_);
+  expect_same_prediction(a.from_.departurePrediction_,
+                         b.from_.departurePrediction_, "from");
+  expect_same_prediction(a.to_.arrivalPrediction_, b.to_.arrivalPrediction_,
+                         "to");
+  ASSERT_EQ(a.intermediateStops_->size(), b.intermediateStops_->size());
+  for (auto i = 0U; i != a.intermediateStops_->size(); ++i) {
+    auto const& x = a.intermediateStops_->at(i);
+    auto const& y = b.intermediateStops_->at(i);
+    EXPECT_EQ(x.name_, y.name_);
+    expect_same_prediction(x.arrivalPrediction_, y.arrivalPrediction_, x.name_);
+    expect_same_prediction(x.departurePrediction_, y.departurePrediction_,
+                           x.name_);
+  }
+}
+
+// The itinerary-level events describe exactly the returned leg: its first
+// departure, its last arrival and its own stops in between.
+void expect_events_of(api::Itinerary const& res, api::Leg const& leg) {
+  expect_same_prediction(res.startPrediction_, leg.from_.departurePrediction_,
+                         "start");
+  expect_same_prediction(res.endPrediction_, leg.to_.arrivalPrediction_,
+                         "end");
+  ASSERT_TRUE(res.intermediateStopEvents_.has_value());
+  ASSERT_EQ(res.intermediateStopEvents_->size(),
+            leg.intermediateStops_->size());
+  for (auto i = 0U; i != leg.intermediateStops_->size(); ++i) {
+    auto const& event = res.intermediateStopEvents_->at(i);
+    auto const& stop = leg.intermediateStops_->at(i);
+    EXPECT_EQ(event.place_.stopId_, stop.stopId_);
+    expect_same_prediction(event.arrivalPrediction_, stop.arrivalPrediction_,
+                           stop.name_);
+    expect_same_prediction(event.departurePrediction_,
+                           stop.departurePrediction_, stop.name_);
+  }
+}
+
+}  // namespace
+
+TEST(motis, trip_without_block_legs_returns_only_the_requested_trip) {
+  auto d = load_block_data("test/trip-without-block-legs-data");
+  apply_block_delays(d);
+  auto const trip_ep = utl::init_from<ep::trip>(d).value();
+  auto const request = [&](std::string_view const trip,
+                           std::string_view const options) {
+    return trip_ep(std::string{"/api/v6/trip?tripId="}
+                       .append(trip)
+                       .append(options));
+  };
+  constexpr auto kOut = "20190501_10%3A00_test_out";
+  constexpr auto kBack = "20190501_10%3A22_test_back";
+  constexpr auto kLoop = "20190501_10%3A42_test_loop";
+
+  auto const full = request(kBack, "&joinInterlinedLegs=false");
+  ASSERT_EQ(3U, full.legs_.size());
+  ASSERT_EQ(7U, full.intermediateStopEvents_->size());
+
+  // First, middle and last trip of the block: one leg each, with the same
+  // per-visit predictions as in the full block response.
+  for (auto const& [trip, idx, id] :
+       {std::tuple{kOut, 0U, kOutId}, std::tuple{kBack, 1U, kBackId},
+        std::tuple{kLoop, 2U, kLoopId}}) {
+    SCOPED_TRACE(id);
+    auto const trimmed =
+        request(trip, "&joinInterlinedLegs=false&withBlockLegs=false");
+    ASSERT_EQ(1U, trimmed.legs_.size());
+    EXPECT_EQ(id, trimmed.legs_.front().tripId_);
+    EXPECT_FALSE(trimmed.legs_.front().interlineWithPreviousLeg_.value_or(
+        false));
+    expect_same_visits(trimmed.legs_.front(), full.legs_.at(idx));
+    expect_events_of(trimmed, trimmed.legs_.front());
+  }
+
+  // No event of another run: the loop's stops are B, C, B; the shared
+  // boundary stops A (to back) and D are the leg's own from/to.
+  auto const loop = request(kLoop, "&joinInterlinedLegs=false&withBlockLegs=false");
+  ASSERT_EQ(3U, loop.intermediateStopEvents_->size());
+  EXPECT_EQ("A", loop.legs_.front().from_.name_);
+  EXPECT_EQ("2019-05-01T08:45:00Z", loop.startPrediction_->time_);
+  EXPECT_EQ("2019-05-01T09:23:00Z", loop.endPrediction_->time_);
+
+  // joinInterlinedLegs=true no longer spans the block either.
+  auto const joined =
+      request(kBack, "&joinInterlinedLegs=true&withBlockLegs=false");
+  ASSERT_EQ(1U, joined.legs_.size());
+  EXPECT_EQ(kBackId, joined.legs_.front().tripId_);
+  expect_same_visits(joined.legs_.front(), full.legs_.at(1U));
+  expect_events_of(joined, joined.legs_.front());
+
+  // The default and older API versions keep returning the whole block.
+  EXPECT_EQ(3U, request(kBack, "&joinInterlinedLegs=false&withBlockLegs=true")
+                    .legs_.size());
+  EXPECT_EQ(3U, trip_ep(std::string{"/api/v5/trip?tripId="}
+                            .append(kBack)
+                            .append("&joinInterlinedLegs=false"
+                                    "&withBlockLegs=false"))
+                    .legs_.size());
+}
+
+TEST(motis, trip_without_block_legs_keeps_single_trip_response) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/trip-single-without-block-data", ec);
+  auto const c = config{
+      .timetable_ =
+          config::timetable{.first_day_ = "2019-05-01",
+                            .num_days_ = 2,
+                            .datasets_ = {{"test", {.path_ = kGTFS}}}},
+      .street_routing_ = false};
+  import(c, "test/trip-single-without-block-data");
+  auto d = data{"test/trip-single-without-block-data", c};
+  auto const trip_ep = utl::init_from<ep::trip>(d).value();
+
+  auto const block =
+      trip_ep("/api/v6/trip?tripId=20190501_10%3A00_test_T1"
+              "&joinInterlinedLegs=false");
+  auto const single =
+      trip_ep("/api/v6/trip?tripId=20190501_10%3A00_test_T1"
+              "&joinInterlinedLegs=false&withBlockLegs=false");
+  ASSERT_EQ(1U, block.legs_.size());
+  ASSERT_EQ(1U, single.legs_.size());
+  expect_same_visits(single.legs_.front(), block.legs_.front());
+  expect_events_of(single, single.legs_.front());
+  expect_events_of(block, block.legs_.front());
+}
+
 constexpr auto kNetex = R"(
 # netex.xml
 <?xml version="1.0" encoding="UTF-8"?>

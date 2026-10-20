@@ -163,8 +163,18 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
   auto fr = requested_fr;
   fr.stop_range_.to_ = fr.size();
   fr.stop_range_.from_ = 0U;
-  auto const from_l = fr[0];
-  auto const to_l = fr[fr.size() - 1U];
+  // By default the response covers the vehicle's whole block (every trip of
+  // the transport); v6 `withBlockLegs=false` keeps it to the requested trip.
+  // The run always spans the transport (stop indices are absolute); the
+  // range only sets where the leg is entered and left.
+  auto const range =
+      api_version < 6 || api::tripV6_params{url.params()}.withBlockLegs_
+          ? fr.stop_range_
+          : requested_fr.stop_range_;
+  auto const first = range.from_;
+  auto const last = static_cast<n::stop_idx_t>(range.to_ - 1U);
+  auto const from_l = fr[first];
+  auto const to_l = fr[last];
   auto const start_time = from_l.time(n::event_type::kDep);
   auto const dest_time = to_l.time(n::event_type::kArr);
   auto cache = street_routing_cache_t{};
@@ -200,8 +210,7 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
            to_l.get_location_idx(), start_time, dest_time,
            n::routing::journey::run_enter_exit{
                fr,  // NOLINT(cppcoreguidelines-slicing)
-               fr.stop_range_.from_,
-               static_cast<n::stop_idx_t>(fr.stop_range_.to_ - 1U)}}},
+               first, last}}},
        .start_time_ = start_time,
        .dest_time_ = dest_time,
        .dest_ = to_l.get_location_idx(),
@@ -233,12 +242,11 @@ api::Itinerary trip::operator()(boost::urls::url_view const& url) const {
       return selected_prediction(tt_, tags_, fr[stop_idx], event_type,
                                  diagnostics, passed_stops);
     };
-    response.startPrediction_ = prediction(0U, n::event_type::kDep);
-    response.endPrediction_ = prediction(
-        static_cast<n::stop_idx_t>(fr.size() - 1U), n::event_type::kArr);
+    response.startPrediction_ = prediction(first, n::event_type::kDep);
+    response.endPrediction_ = prediction(last, n::event_type::kArr);
     auto intermediate = std::vector<api::IntermediateStopEvent>{};
-    intermediate.reserve(fr.size() > 2U ? fr.size() - 2U : 0U);
-    for (auto i = n::stop_idx_t{1U}; i + 1U < fr.size(); ++i) {
+    intermediate.reserve(static_cast<std::size_t>(last - first) - 1U);
+    for (auto i = static_cast<n::stop_idx_t>(first + 1U); i < last; ++i) {
       auto const stop = fr[i];
       if (!query.withScheduledSkippedStops_ &&
           !stop.get_scheduled_stop().in_allowed() &&

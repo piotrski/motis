@@ -2213,10 +2213,11 @@ and the inner array as OR (you can choose which ticket to buy)
 } as const;
 
 export const IntermediateStopEventSchema = {
-    description: `Stop event of the whole vehicle block of a v6 trip response. Kept for
-compatibility; prefer the per-visit \`arrivalPrediction\` and
-\`departurePrediction\` of each leg's \`from\`, \`to\` and
-\`intermediateStops\`, which are scoped to that leg's run.
+    description: `Stop event of the legs a v6 trip response returns (the vehicle's whole
+block unless \`withBlockLegs=false\`). Kept for compatibility; prefer
+the per-visit \`arrivalPrediction\` and \`departurePrediction\` of each
+leg's \`from\`, \`to\` and \`intermediateStops\`, which are scoped to that
+leg's run.
 `,
     type: 'object',
     required: ['place'],
@@ -2270,12 +2271,15 @@ export const ItinerarySchema = {
             }
         },
         startPrediction: {
+            description: 'v6 trip responses: selected prediction for the departure from the first stop of the returned legs (see `withBlockLegs`).',
             '$ref': '#/components/schemas/SelectedPrediction'
         },
         endPrediction: {
+            description: 'v6 trip responses: selected prediction for the arrival at the last stop of the returned legs (see `withBlockLegs`).',
             '$ref': '#/components/schemas/SelectedPrediction'
         },
         intermediateStopEvents: {
+            description: 'v6 trip responses: stop events between the first and the last stop of the returned legs (see `withBlockLegs`).',
             type: 'array',
             items: {
                 '$ref': '#/components/schemas/IntermediateStopEvent'

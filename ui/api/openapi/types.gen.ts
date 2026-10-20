@@ -1639,10 +1639,11 @@ export type FareTransfer = {
 };
 
 /**
- * Stop event of the whole vehicle block of a v6 trip response. Kept for
- * compatibility; prefer the per-visit `arrivalPrediction` and
- * `departurePrediction` of each leg's `from`, `to` and
- * `intermediateStops`, which are scoped to that leg's run.
+ * Stop event of the legs a v6 trip response returns (the vehicle's whole
+ * block unless `withBlockLegs=false`). Kept for compatibility; prefer
+ * the per-visit `arrivalPrediction` and `departurePrediction` of each
+ * leg's `from`, `to` and `intermediateStops`, which are scoped to that
+ * leg's run.
  *
  */
 export type IntermediateStopEvent = {
@@ -1676,8 +1677,17 @@ export type Itinerary = {
      * Fare information
      */
     fareTransfers?: Array<FareTransfer>;
+    /**
+     * v6 trip responses: selected prediction for the departure from the first stop of the returned legs (see `withBlockLegs`).
+     */
     startPrediction?: SelectedPrediction;
+    /**
+     * v6 trip responses: selected prediction for the arrival at the last stop of the returned legs (see `withBlockLegs`).
+     */
     endPrediction?: SelectedPrediction;
+    /**
+     * v6 trip responses: stop events between the first and the last stop of the returned legs (see `withBlockLegs`).
+     */
     intermediateStopEvents?: Array<IntermediateStopEvent>;
     /**
      * GPS timing propagated from the immediately preceding trip on the same block. Present only on v6 trip responses while that context is selected and fresh.
@@ -3317,6 +3327,26 @@ export type TripV6Data = {
         joinInterlinedLegs?: boolean;
         language?: Array<(string)>;
         tripId: string;
+        /**
+         * Optional. Default is `true`.
+         *
+         * Controls whether the response covers the vehicle's whole block or
+         * only the requested trip:
+         * - `withBlockLegs=true` (default): every trip the vehicle serves
+         * without a transfer (stay-seated, `block_id`), as several legs or
+         * one joined leg depending on `joinInterlinedLegs`.
+         * `startPrediction` and `endPrediction` are the block's first
+         * departure and last arrival, `intermediateStopEvents` lists every
+         * stop of the block in between.
+         * - `withBlockLegs=false`: only the requested trip, as exactly one
+         * leg (with either `joinInterlinedLegs` value). `startPrediction`
+         * and `endPrediction` are that trip's first departure and last
+         * arrival, `intermediateStopEvents` lists its stops in between.
+         * Stay-seated predecessors are still summarised by
+         * `incomingLegPrediction`.
+         *
+         */
+        withBlockLegs?: boolean;
         withScheduledSkippedStops?: boolean;
     };
 };
