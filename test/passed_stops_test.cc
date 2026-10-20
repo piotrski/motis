@@ -135,13 +135,14 @@ struct cycle {
 };
 
 struct fixture {
-  explicit fixture(std::string_view const path) {
+  explicit fixture(std::string_view const path,
+                   std::string const& gtfs = kGtfs) {
     auto ec = std::error_code{};
     std::filesystem::remove_all(path, ec);
     auto const c = config{
         .timetable_ = config::timetable{.first_day_ = "2019-05-01",
                                         .num_days_ = 3,
-                                        .datasets_ = {{"test", {.path_ = kGtfs}}}},
+                                        .datasets_ = {{"test", {.path_ = gtfs}}}},
         .street_routing_ = false};
     import(c, path);
     d_.emplace(path, c);
@@ -602,4 +603,34 @@ TEST(passed_stops, stoptimes_marks_passed_events_of_realtime_runs) {
       ep("/api/v6/stoptimes?stopId=test_s2&time=2019-05-01T10:07:30Z&n=1");
   ASSERT_EQ(1U, after.stopTimes_.size());
   EXPECT_EQ(kT1, after.stopTimes_[0].tripId_);
+}
+
+TEST(passed_stops, repeated_stop_id_keeps_passed_visits) {
+  // T1 becomes s1 -> s2 -> s1 -> s4: a stop_id-only update for the second s1
+  // must not be taken for the first visit and drop the frozen ones.
+  auto gtfs = std::string{kGtfs};
+  auto const old = std::string{"T1,10:10:00,10:10:00,s3,3"};
+  gtfs.replace(gtfs.find(old), old.size(), "T1,10:10:00,10:10:00,s1,3");
+  auto f = fixture{"test/passed-stops-loop", gtfs};
+  auto c1 = f.run(
+      kDay + 10h + 1min,
+      feed("T1", "10:00:00", {{.stop_id_ = "s1", .time_ = kDay + 10h + 2min}},
+           kDay + 10h + 1min),
+      nullptr);
+  auto c2 = f.run(
+      kDay + 10h + 4min,
+      feed("T1", "10:00:00", {{.stop_id_ = "s2", .time_ = kDay + 10h + 7min}},
+           kDay + 10h + 4min),
+      &c1);
+  auto c3 = f.run(
+      kDay + 10h + 9min,
+      feed("T1", "10:00:00", {{.stop_id_ = "s1", .time_ = kDay + 10h + 12min}},
+           kDay + 10h + 9min),
+      &c2);
+  auto const t = f.transport(c3, kT1);
+  ASSERT_NE(nullptr, c2.store_.find(t, 0U, kDep));
+  EXPECT_NE(nullptr, c3.store_.find(t, 0U, kDep));
+  EXPECT_NE(nullptr, c3.store_.find(t, 1U, kArr));
+  EXPECT_EQ("10:02", f.time(c3, kT1, 0U, kDep));
+  EXPECT_EQ("10:07", f.time(c3, kT1, 1U, kArr));
 }

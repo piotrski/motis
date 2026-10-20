@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ranges>
 
 #include "nigiri/loader/gtfs/stop_seq_number_encoding.h"
 #include "nigiri/logging.h"
@@ -58,20 +59,48 @@ std::optional<resolved_position> resolve_position(
   }
 
   // Same matching as nigiri's update_run: stop_sequence where the feed has
-  // it, the scheduled stop_id otherwise (ZTP trams send stop_id only).
+  // it, the scheduled stop_id otherwise (ZTP trams send stop_id only). A
+  // stop_id can be visited twice (loops): search from where the vehicle was
+  // last cycle, and never move back on an ambiguous stop_id match.
+  auto const previous_first = ctx.previous_ == nullptr
+                                  ? std::optional<n::stop_idx_t>{}
+                                  : [&]() -> std::optional<n::stop_idx_t> {
+    auto const it = ctx.previous_->first_covered_.find(
+        trip_key{run.t_, run.stop_range_.from_});
+    return it == end(ctx.previous_->first_covered_) ? std::nullopt
+                                                    : std::optional{it->second};
+  }();
   auto const location_seq =
       ctx.tt_.route_location_seq_[ctx.tt_.transport_route_[run.t_.t_idx_]];
-  for (auto i = n::stop_idx_t{0U}; i != sequences.size(); ++i) {
+  auto const matches = [&](n::stop_idx_t const i) {
+    if (position.first_stop_sequence_.has_value()) {
+      return *position.first_stop_sequence_ == sequences[i];
+    }
     auto const stop_idx = static_cast<n::stop_idx_t>(run.stop_range_.from_ + i);
     auto const location = n::stop{location_seq[stop_idx]}.location_idx();
-    if ((position.first_stop_sequence_.has_value() &&
-         *position.first_stop_sequence_ == sequences[i]) ||
-        (position.first_stop_id_.has_value() &&
-         *position.first_stop_id_ == ctx.tt_.locations_.ids_[location].view())) {
+    return position.first_stop_id_.has_value() &&
+           *position.first_stop_id_ == ctx.tt_.locations_.ids_[location].view();
+  };
+  auto const by_stop_id = !position.first_stop_sequence_.has_value();
+  auto const search_from =
+      by_stop_id && previous_first.has_value()
+          ? static_cast<n::stop_idx_t>(*previous_first - run.stop_range_.from_)
+          : n::stop_idx_t{0U};
+  for (auto i = search_from; i < sequences.size(); ++i) {
+    if (matches(i)) {
       return resolved_position{.run_ = run,
                                .sequences_ = std::move(sequences),
-                               .first_covered_ = stop_idx};
+                               .first_covered_ = static_cast<n::stop_idx_t>(
+                                   run.stop_range_.from_ + i)};
     }
+  }
+  if (by_stop_id && previous_first.has_value() &&
+      std::ranges::any_of(std::views::iota(n::stop_idx_t{0U}, search_from),
+                          matches)) {
+    // Only an earlier visit matches: keep the vehicle where it was.
+    return resolved_position{.run_ = run,
+                             .sequences_ = std::move(sequences),
+                             .first_covered_ = *previous_first};
   }
   return std::nullopt;
 }
