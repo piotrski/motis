@@ -548,3 +548,22 @@ TEST(motis_vehicle_stream, hub_bounds_languages_connections_and_inbound_messages
   EXPECT_EQ(3U, f.hub_->stats().at("droppedMessages").as_uint64());
   f.run();
 }
+
+TEST(motis_vehicle_stream, hub_caps_languages_when_a_deferred_update_builds_its_cycle) {
+  auto f = hub_fixture{settings{.max_languages_ = 1U}};
+  f.publish({{"a", 50.05, 19.9, kNow - 10}});
+  auto const polish = f.open(kKrakow + "&language=pl");
+  ASSERT_EQ(1U, polish->pending());
+
+  // The Polish snapshot is still being written when the next cycle arrives,
+  // and a German subscriber takes the only language slot of that cycle.
+  f.publish({{"a", 50.051, 19.9, kNow - 5}});
+  auto const german = f.open(kKrakow + "&language=de");
+  EXPECT_EQ("snapshot", f.last(*german).at("type").as_string());
+
+  polish->complete();
+  f.run();
+  ASSERT_EQ(1U, polish->pending());
+  EXPECT_EQ("error", f.last(*polish).at("type").as_string());
+  EXPECT_EQ(2, f.builds_);
+}

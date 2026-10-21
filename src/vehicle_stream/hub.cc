@@ -354,7 +354,7 @@ cycle const* hub::cycle_for(subscription const& sub) {
     return &it->second;
   }
   auto const current = current_.lock();
-  if (current == nullptr) {
+  if (current == nullptr || cycles_.size() >= settings_.max_languages_) {
     return nullptr;
   }
   auto const started = std::chrono::steady_clock::now();
@@ -382,6 +382,17 @@ void hub::pump(connection& c) {
   }
   auto const* cy = cycle_for(*c.state_.sub_);
   if (cy == nullptr) {
+    if (current_.lock() != nullptr) {
+      // Refused: this cycle already holds as many languages as allowed.
+      c.dirty_ = false;
+      auto const sub_id = c.state_.sub_->id_;
+      c.state_.sub_.reset();
+      send(c,
+           control({{"type", "error"},
+                    {"sub", sub_id},
+                    {"message", "too many languages in use"}}),
+           false);
+    }
     return;
   }
   c.dirty_ = false;

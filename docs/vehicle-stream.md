@@ -47,3 +47,6 @@ to drop vehicles that went stale.
 strand, so sends from another thread race the socket's reads (pings, pongs, close). The prototype build applies
 `patches/net/0001-websocket-send-on-strand.patch` to `deps/net`, which posts `send` onto the socket's executor.
 To ship it, upstream that to motis-project/net (or point `.pkg` at a fork) and drop the patch.
+
+Also needed in `net` before production: a `read_message_max` on the WebSocket stream (Beast defaults to 16 MiB), so
+oversized client messages are refused before they are buffered. The hub only rejects them after the fact.
