@@ -21,6 +21,29 @@ namespace fs = std::filesystem;
 
 namespace motis {
 
+nigiri::clasz parse_vehicle_eta_clasz(std::string_view const mode) {
+  if (mode == "AIRPLANE") {
+    return nigiri::clasz::kAir;
+  } else if (mode == "HIGHSPEED_RAIL") {
+    return nigiri::clasz::kHighSpeed;
+  } else if (mode == "LONG_DISTANCE") {
+    return nigiri::clasz::kLongDistance;
+  } else if (mode == "NIGHT_RAIL") {
+    return nigiri::clasz::kNight;
+  } else if (mode == "REGIONAL_FAST_RAIL" || mode == "REGIONAL_RAIL") {
+    return nigiri::clasz::kRegional;
+  } else if (mode == "FERRY") {
+    return nigiri::clasz::kShip;
+  } else if (mode == "ODM") {
+    return nigiri::clasz::kODM;
+  } else if (mode == "CABLE_CAR" || mode == "FUNICULAR") {
+    return nigiri::clasz::kFunicular;
+  } else if (mode == "AREAL_LIFT" || mode == "AERIAL_LIFT") {
+    return nigiri::clasz::kAerialLift;
+  }
+  return nigiri::to_clasz(mode);
+}
+
 template <rfl::internal::StringLiteral Name>
 consteval auto drop_last() {
   return []<size_t... Is>(std::index_sequence<Is...>) {
@@ -162,6 +185,10 @@ void config::verify() const {
       utl::verify(!id.contains("_"), "dataset identifier may not contain '_'");
       if (d.rt_.has_value()) {
         for (auto const& rt : *d.rt_) {
+          utl::verify(
+              rt.protocol_ != timetable::dataset::rt::protocol::gtfsrt ||
+                  rt.last_good_ttl_ > 0U,
+              "GTFS-RT last_good_ttl must be greater than zero");
           try {
             boost::urls::url{rt.url_};
           } catch (std::exception const& e) {
@@ -170,6 +197,75 @@ void config::verify() const {
           utl::verify(rt.protocol_ != timetable::dataset::rt::protocol::auser ||
                           timetable_->incremental_rt_update_,
                       "VDV AUS requires incremental RT update scheme");
+        }
+      }
+    }
+
+    if (timetable_->vehicle_eta_) {
+      auto const& eta = *timetable_->vehicle_eta_;
+      utl::verify(eta.history_.max_age_seconds_ > 0,
+                  "vehicle_eta history max_age_seconds must be greater than "
+                  "zero");
+      utl::verify(eta.history_.retention_seconds_ > 0,
+                  "vehicle_eta history retention_seconds must be greater "
+                  "than zero");
+      utl::verify(
+          eta.history_.retention_seconds_ >= eta.history_.max_age_seconds_,
+          "vehicle_eta history retention_seconds must be greater "
+          "than or equal to max_age_seconds");
+      utl::verify(
+          eta.history_.max_observations_per_vehicle_ > 0U,
+          "vehicle_eta history max_observations_per_vehicle must be greater "
+          "than zero");
+      utl::verify(
+          eta.history_.max_observation_gap_seconds_ > 0,
+          "vehicle_eta history max_observation_gap_seconds must be greater "
+          "than zero");
+      utl::verify(eta.selection_.min_gps_confidence_ >= 0.0 &&
+                      eta.selection_.min_gps_confidence_ <= 1.0,
+                  "vehicle_eta selection min_gps_confidence must be between "
+                  "zero and one");
+      utl::verify(
+          eta.selection_.min_selected_gps_confidence_ >= 0.0 &&
+              eta.selection_.min_selected_gps_confidence_ <=
+                  eta.selection_.min_gps_confidence_,
+          "vehicle_eta selection min_selected_gps_confidence must be between "
+          "zero and min_gps_confidence");
+      utl::verify(
+          eta.selection_.provider_timestamp_tolerance_seconds_ >= 0,
+          "vehicle_eta selection provider_timestamp_tolerance_seconds must "
+          "not be negative");
+      utl::verify(
+          eta.selection_.early_departure_tolerance_seconds_ >= 0,
+          "vehicle_eta selection early_departure_tolerance_seconds must not "
+          "be negative");
+      utl::verify(eta.selection_.minute_rounding_deadband_seconds_ >= 0,
+                  "vehicle_eta selection minute_rounding_deadband_seconds "
+                  "must not be negative");
+
+      auto mode_claszes = std::set<nigiri::clasz>{};
+      for (auto const& entry : eta.modes_) {
+        auto const clasz = parse_vehicle_eta_clasz(entry.first);
+        utl::verify(mode_claszes.emplace(clasz).second,
+                    "vehicle_eta modes contain duplicate transit class {}",
+                    nigiri::to_str(clasz));
+      }
+      for (auto const& [feed_id, feed] : eta.feeds_) {
+        utl::verify(timetable_->datasets_.contains(feed_id),
+                    "vehicle_eta feed {} is not a configured timetable "
+                    "dataset",
+                    feed_id);
+        if (feed.modes_) {
+          utl::verify(!feed.modes_->empty(),
+                      "vehicle_eta feed {} modes must not be empty", feed_id);
+          auto feed_claszes = std::set<nigiri::clasz>{};
+          for (auto const& mode : *feed.modes_) {
+            auto const clasz = parse_vehicle_eta_clasz(mode);
+            utl::verify(
+                feed_claszes.emplace(clasz).second,
+                "vehicle_eta feed {} modes contain duplicate transit class {}",
+                feed_id, nigiri::to_str(clasz));
+          }
         }
       }
     }
@@ -285,6 +381,45 @@ bool config::use_street_routing() const {
           [](bool const b) { return b; },
       },
       street_routing_);
+}
+
+config::timetable::vehicle_eta::mode config::vehicle_eta_mode(
+    std::string_view const feed, nigiri::clasz const transit_mode) const {
+  if (!timetable_ || !timetable_->vehicle_eta_) {
+    return timetable::vehicle_eta::mode::off;
+  }
+
+  auto const& eta = *timetable_->vehicle_eta_;
+  if (auto const it = eta.feeds_.find(std::string{feed});
+      it != end(eta.feeds_) &&
+      (!it->second.modes_ ||
+       utl::any_of(*it->second.modes_, [&](auto const& mode) {
+         return parse_vehicle_eta_clasz(mode) == transit_mode;
+       }))) {
+    return it->second.mode_;
+  }
+  for (auto const& [mode, policy] : eta.modes_) {
+    if (parse_vehicle_eta_clasz(mode) == transit_mode) {
+      return policy;
+    }
+  }
+  return eta.mode_;
+}
+
+bool config::vehicle_eta_enabled() const {
+  if (!timetable_ || !timetable_->vehicle_eta_) {
+    return false;
+  }
+  for (auto const& dataset : timetable_->datasets_) {
+    auto const& feed = dataset.first;
+    for (auto i = 0U; i != nigiri::kNumClasses; ++i) {
+      if (vehicle_eta_mode(feed, static_cast<nigiri::clasz>(i)) !=
+          timetable::vehicle_eta::mode::off) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 }  // namespace motis

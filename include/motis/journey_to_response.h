@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string_view>
 #include <variant>
 
@@ -32,6 +33,14 @@ std::optional<std::vector<api::Alert>> get_alerts(
     std::optional<std::pair<nigiri::rt::run_stop, nigiri::event_type>> const&,
     bool fuzzy_stop,
     std::optional<std::vector<std::string>> const& language);
+
+// Called for each stop event of a transit leg, right after the leg's Place for
+// that stop visit was built: once with kDep for `from`, once with kArr for
+// `to`, and with both for every intermediate stop. The run_stop identifies the
+// exact stop visit (transport + stop index), so callers can attach data that
+// belongs to this visit only.
+using transit_stop_event_hook_t = std::function<void(
+    api::Place&, nigiri::rt::run_stop const&, nigiri::event_type)>;
 
 api::Itinerary journey_to_response(
     osr::ways const*,
@@ -70,6 +79,7 @@ api::Itinerary journey_to_response(
     bool ignore_dest_rental_return_constraints,
     std::optional<std::vector<std::string>> const& language,
     nigiri::routing::query const* leg_alternatives_query = nullptr,
-    std::size_t num_leg_alternatives = 0U);
+    std::size_t num_leg_alternatives = 0U,
+    transit_stop_event_hook_t const& on_transit_stop_event = {});
 
 }  // namespace motis

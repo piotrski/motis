@@ -1,0 +1,664 @@
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "gtest/gtest.h"
+
+#include "motis/rt/vehicle_observation_history.h"
+
+namespace motis {
+namespace {
+
+using namespace std::chrono_literals;
+
+constexpr auto const kPolicy = observation_history_policy{
+    .max_age_ = 300s, .max_observations_per_vehicle_ = 3U};
+
+vehicle_observation observation(
+    std::int64_t const ingested,
+    std::optional<std::int64_t> const reported = std::nullopt,
+    std::string entity = "entity",
+    std::optional<std::string> vehicle = std::optional<std::string>{"vehicle"},
+    std::string trip = "trip") {
+  return vehicle_observation{
+      .feed_id_ = "feed",
+      .entity_id_ = std::move(entity),
+      .vehicle_id_ = std::move(vehicle),
+      .trip_ = {.trip_id_ = std::move(trip), .start_date_ = "20260731"},
+      .latitude_ = 50.0,
+      .longitude_ = 19.0 + static_cast<double>(ingested) / 1000.0,
+      .reported_time_ = reported,
+      .ingested_time_ = ingested};
+}
+
+vehicle_key descriptor_key(std::string id = "vehicle") {
+  return vehicle_key{"feed", std::move(id),
+                     vehicle_key_source::kVehicleDescriptor};
+}
+
+vehicle_key entity_key(std::string id = "entity") {
+  return vehicle_key{"feed", std::move(id), vehicle_key_source::kEntityId};
+}
+
+TEST(vehicle_observation_history, orders_by_reported_then_ingest_time) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(observation(120, 110), kPolicy));
+  EXPECT_TRUE(history.ingest(observation(130, 100), kPolicy));
+  EXPECT_TRUE(history.ingest(observation(125, 110), kPolicy));
+
+  auto const values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 3U);
+  EXPECT_EQ(values[0].reported_time_, 100);
+  EXPECT_EQ(values[1].ingested_time_, 120);
+  EXPECT_EQ(values[2].ingested_time_, 125);
+  ASSERT_NE(history.effective_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.effective_observation(descriptor_key())->ingested_time_,
+            125);
+}
+
+TEST(vehicle_observation_history,
+     falls_back_to_ingest_time_when_reported_time_is_missing) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(observation(100), kPolicy));
+  EXPECT_TRUE(history.ingest(observation(120, 110), kPolicy));
+
+  auto const values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 2U);
+  EXPECT_EQ(observation_time(values[0]), 100);
+  EXPECT_EQ(observation_time(values[1]), 110);
+}
+
+TEST(vehicle_observation_history,
+     far_future_reported_time_does_not_poison_trip_rotation) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(observation(100, 10'000), kPolicy));
+  EXPECT_EQ(observation_time(history.observations(descriptor_key()).front()),
+            100);
+
+  EXPECT_TRUE(history.ingest(observation(110, 110, "entity", "vehicle",
+                                         "next-trip"),
+                             kPolicy));
+  auto const values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 1U);
+  EXPECT_EQ(values.front().trip_.trip_id_, "next-trip");
+  EXPECT_EQ(observation_time(values.front()), 110);
+}
+
+TEST(vehicle_observation_history, returns_observations_only_for_matching_trip) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(
+      observation(100, 100, "entity", "vehicle", "current-trip"), kPolicy));
+
+  EXPECT_FALSE(history
+                   .observations(descriptor_key(),
+                                 {.trip_id_ = "current-trip",
+                                  .start_date_ = "20260731"})
+                   .empty());
+  EXPECT_TRUE(history
+                  .observations(descriptor_key(),
+                                {.trip_id_ = "departed-trip",
+                                 .start_date_ = "20260731"})
+                  .empty());
+}
+
+TEST(vehicle_observation_history,
+     deduplicates_repeated_reports_without_refreshing_their_age) {
+  auto history = vehicle_observation_history{};
+  auto const first = observation(100, 90);
+  auto repeated = first;
+  repeated.ingested_time_ = 200;
+
+  EXPECT_TRUE(history.ingest(first, kPolicy));
+  EXPECT_TRUE(history.ingest(repeated, kPolicy));
+  ASSERT_EQ(history.observation_count(), 1U);
+  EXPECT_EQ(history.observations(descriptor_key())[0].ingested_time_, 200);
+
+  history.prune(391, kPolicy);
+  EXPECT_EQ(history.observation_count(), 0U);
+}
+
+TEST(vehicle_observation_history,
+     preserves_status_correction_for_the_same_provider_observation) {
+  auto history = vehicle_observation_history{};
+  auto incoming = observation(100, 90);
+  incoming.current_status_ = "INCOMING_AT";
+  auto stopped = incoming;
+  stopped.current_status_ = "STOPPED_AT";
+  stopped.ingested_time_ = 110;
+
+  EXPECT_TRUE(history.ingest(incoming, kPolicy));
+  EXPECT_TRUE(history.ingest(stopped, kPolicy));
+
+  auto const values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 1U);
+  EXPECT_EQ(values.front().current_status_, "STOPPED_AT");
+  EXPECT_EQ(values.front().ingested_time_, 110);
+}
+
+TEST(vehicle_observation_history, enforces_count_and_age_bounds) {
+  auto history = vehicle_observation_history{};
+  for (auto const time : {100, 110, 120, 130}) {
+    EXPECT_TRUE(history.ingest(observation(time, time), kPolicy));
+  }
+
+  auto values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 3U);
+  EXPECT_EQ(values.front().reported_time_, 110);
+
+  history.prune(421, kPolicy);
+  values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 1U);
+  EXPECT_EQ(values.front().reported_time_, 130);
+}
+
+TEST(vehicle_observation_history, can_retain_samples_beyond_freshness_window) {
+  auto history = vehicle_observation_history{};
+  auto const retention_policy = observation_history_policy{
+      .max_age_ = 900s, .max_observations_per_vehicle_ = 20U};
+  EXPECT_TRUE(history.ingest(observation(100, 100), retention_policy));
+
+  history.prune(401, retention_policy);
+
+  ASSERT_EQ(history.observations(descriptor_key()).size(), 1U);
+  EXPECT_EQ(history.observations(descriptor_key()).front().reported_time_, 100);
+}
+
+TEST(vehicle_observation_history, bounds_active_histories_by_recency) {
+  auto history = vehicle_observation_history{};
+  auto const policy = observation_history_policy{
+      .max_age_ = 900s,
+      .max_observations_per_vehicle_ = 20U,
+      .max_active_histories_ = 2U};
+  EXPECT_TRUE(
+      history.ingest(observation(100, 100, "one", "one"), policy));
+  EXPECT_TRUE(
+      history.ingest(observation(110, 110, "two", "two"), policy));
+  EXPECT_TRUE(
+      history.ingest(observation(120, 120, "three", "three"), policy));
+
+  EXPECT_EQ(history.active_histories(), 2U);
+  EXPECT_TRUE(history.observations(descriptor_key("one")).empty());
+  EXPECT_FALSE(history.observations(descriptor_key("two")).empty());
+  EXPECT_FALSE(history.observations(descriptor_key("three")).empty());
+}
+
+TEST(vehicle_observation_history, resets_when_trip_instance_changes) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(observation(90, 90), kPolicy));
+  EXPECT_TRUE(history.ingest(
+      observation(100, 100, "entity", "vehicle", "next-trip"), kPolicy));
+
+  auto const values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 1U);
+  EXPECT_EQ(values.front().trip_.trip_id_, "next-trip");
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key())->trip_.trip_id_,
+            "next-trip");
+}
+
+TEST(vehicle_observation_history,
+     ignores_late_observation_from_prior_trip_instance) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(
+      observation(200, 200, "entity", "vehicle", "next-trip"), kPolicy));
+  EXPECT_TRUE(history.ingest(observation(210, 150), kPolicy));
+
+  auto const values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 1U);
+  EXPECT_EQ(values.front().trip_.trip_id_, "next-trip");
+  ASSERT_NE(history.effective_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.effective_observation(descriptor_key())->reported_time_,
+            200);
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key())->reported_time_, 200);
+}
+
+TEST(vehicle_observation_history, resets_when_identity_key_source_changes) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(observation(100, 100), kPolicy));
+  EXPECT_TRUE(
+      history.ingest(observation(110, 110, "entity", std::nullopt), kPolicy));
+
+  EXPECT_TRUE(history.observations(descriptor_key()).empty());
+  ASSERT_EQ(history.observations(entity_key()).size(), 1U);
+  EXPECT_EQ(history.active_histories(), 1U);
+}
+
+TEST(vehicle_observation_history,
+     ignores_late_observation_missing_the_vehicle_descriptor_id) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(observation(200, 200), kPolicy));
+  EXPECT_TRUE(
+      history.ingest(observation(210, 150, "entity", std::nullopt), kPolicy));
+
+  ASSERT_EQ(history.observations(descriptor_key()).size(), 1U);
+  EXPECT_TRUE(history.observations(entity_key()).empty());
+  ASSERT_NE(history.effective_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.effective_observation(descriptor_key())->reported_time_,
+            200);
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key())->reported_time_, 200);
+}
+
+TEST(vehicle_observation_history,
+     ignores_late_vehicle_descriptor_after_entity_id_fallback) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(
+      history.ingest(observation(200, 200, "entity", std::nullopt), kPolicy));
+  EXPECT_TRUE(history.ingest(observation(210, 150), kPolicy));
+
+  ASSERT_EQ(history.observations(entity_key()).size(), 1U);
+  EXPECT_TRUE(history.observations(descriptor_key()).empty());
+  ASSERT_NE(history.effective_observation(entity_key()), nullptr);
+  EXPECT_EQ(history.effective_observation(entity_key())->reported_time_, 200);
+  ASSERT_NE(history.current_observation(entity_key()), nullptr);
+  EXPECT_EQ(history.current_observation(entity_key())->reported_time_, 200);
+}
+
+TEST(vehicle_observation_history,
+     ignores_late_observation_for_a_different_vehicle_descriptor) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(observation(200, 200), kPolicy));
+  EXPECT_TRUE(history.ingest(observation(210, 150, "entity", "other-vehicle"),
+                             kPolicy));
+
+  ASSERT_EQ(history.observations(descriptor_key()).size(), 1U);
+  EXPECT_TRUE(history.observations(descriptor_key("other-vehicle")).empty());
+  ASSERT_NE(history.effective_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.effective_observation(descriptor_key())->reported_time_,
+            200);
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key())->reported_time_, 200);
+}
+
+TEST(vehicle_observation_history,
+     keeps_history_when_only_the_feed_entity_id_changes) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(observation(100, 100, "first-entity"), kPolicy));
+  EXPECT_TRUE(history.ingest(observation(110, 110, "second-entity"), kPolicy));
+
+  auto const values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 2U);
+  EXPECT_EQ(values.front().entity_id_, "first-entity");
+  EXPECT_EQ(values.back().entity_id_, "second-entity");
+}
+
+TEST(vehicle_observation_history,
+     retains_out_of_order_data_without_regressing_effective_observation) {
+  auto history = vehicle_observation_history{};
+  EXPECT_TRUE(history.ingest(observation(200, 200), kPolicy));
+  EXPECT_TRUE(history.ingest(observation(210, 150), kPolicy));
+
+  auto const values = history.observations(descriptor_key());
+  ASSERT_EQ(values.size(), 2U);
+  EXPECT_EQ(values.front().reported_time_, 150);
+  ASSERT_NE(history.effective_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.effective_observation(descriptor_key())->reported_time_,
+            200);
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key())->reported_time_, 200);
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_invalidates_current_but_preserves_short_history) {
+  auto history = vehicle_observation_history{};
+  auto const initial = std::array{observation(100, 100)};
+  history.replace_feed("feed", initial, 100, kPolicy);
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+
+  history.replace_feed("feed", {}, 110, kPolicy);
+
+  EXPECT_EQ(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.observations(descriptor_key()).size(), 1U);
+  history.prune(401, kPolicy);
+  EXPECT_TRUE(history.observations(descriptor_key()).empty());
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_allows_equal_time_reuse_after_vehicle_is_absent) {
+  auto history = vehicle_observation_history{};
+  auto const initial = std::array{observation(200, 200, "e1", "V")};
+  history.replace_feed("feed", initial, 200, kPolicy);
+  history.replace_feed("feed", {}, 210, kPolicy);
+
+  auto const replacement = std::array{observation(220, 200, "e1", "W")};
+  history.replace_feed("feed", replacement, 220, kPolicy);
+
+  EXPECT_EQ(history.current_observation(descriptor_key("V")), nullptr);
+  EXPECT_TRUE(history.observations(descriptor_key("V")).empty());
+  ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("W"))->reported_time_,
+            200);
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_keeps_newer_current_across_a_late_prior_trip) {
+  auto history = vehicle_observation_history{};
+  auto const current =
+      std::array{observation(200, 200, "entity", "vehicle", "next-trip")};
+  history.replace_feed("feed", current, 200, kPolicy);
+
+  auto const late = std::array{observation(210, 150)};
+  history.replace_feed("feed", late, 210, kPolicy);
+
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key())->reported_time_, 200);
+  EXPECT_EQ(history.current_observation(descriptor_key())->trip_.trip_id_,
+            "next-trip");
+  ASSERT_EQ(history.observations(descriptor_key()).size(), 1U);
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_keeps_newer_current_across_a_late_identity_change) {
+  auto history = vehicle_observation_history{};
+  auto const current = std::array{observation(200, 200)};
+  history.replace_feed("feed", current, 200, kPolicy);
+
+  auto const late = std::array{observation(210, 150, "entity", std::nullopt)};
+  history.replace_feed("feed", late, 210, kPolicy);
+
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key())->reported_time_, 200);
+  EXPECT_EQ(history.current_observation(entity_key()), nullptr);
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_removes_only_current_vehicles_that_are_absent) {
+  auto history = vehicle_observation_history{};
+  auto const current =
+      std::array{observation(200, 200),
+                 observation(200, 200, "other-entity", "other-vehicle")};
+  history.replace_feed("feed", current, 200, kPolicy);
+
+  auto const late = std::array{observation(210, 150)};
+  history.replace_feed("feed", late, 210, kPolicy);
+
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key())->reported_time_, 200);
+  EXPECT_EQ(history.current_observation(descriptor_key("other-vehicle")),
+            nullptr);
+  EXPECT_EQ(history.observations(descriptor_key("other-vehicle")).size(), 1U);
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_preserves_vehicle_when_its_old_entity_is_reused) {
+  auto history = vehicle_observation_history{};
+  auto const initial = std::array{observation(100, 100, "e1", "V")};
+  history.replace_feed("feed", initial, 100, kPolicy);
+
+  auto const replacement = std::array{observation(110, 110, "e2", "V"),
+                                      observation(110, 110, "e1", "W")};
+  history.replace_feed("feed", replacement, 110, kPolicy);
+
+  ASSERT_NE(history.current_observation(descriptor_key("V")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("V"))->entity_id_, "e2");
+  ASSERT_EQ(history.observations(descriptor_key("V")).size(), 2U);
+  ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_, "e1");
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_is_order_independent_when_old_entity_is_reused) {
+  auto history = vehicle_observation_history{};
+  auto const initial = std::array{observation(100, 100, "e1", "V")};
+  history.replace_feed("feed", initial, 100, kPolicy);
+
+  auto const replacement = std::array{observation(110, 110, "e1", "W"),
+                                      observation(110, 110, "e2", "V")};
+  history.replace_feed("feed", replacement, 110, kPolicy);
+
+  ASSERT_NE(history.current_observation(descriptor_key("V")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("V"))->entity_id_, "e2");
+  ASSERT_EQ(history.observations(descriptor_key("V")).size(), 2U);
+  ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_, "e1");
+}
+
+TEST(vehicle_observation_history,
+     stale_prior_trip_is_not_alternate_identity_evidence) {
+  auto history = vehicle_observation_history{};
+  auto const current =
+      std::array{observation(200, 200, "e1", "V", "next-trip")};
+  history.replace_feed("feed", current, 200, kPolicy);
+
+  auto const replacement = std::array{observation(210, 150, "e2", "V", "trip"),
+                                      observation(210, 210, "e1", "W", "trip")};
+  history.replace_feed("feed", replacement, 210, kPolicy);
+
+  EXPECT_EQ(history.current_observation(descriptor_key("V")), nullptr);
+  EXPECT_TRUE(history.observations(descriptor_key("V")).empty());
+  ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_, "e1");
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_reconsiders_older_reuse_with_valid_alternate) {
+  for (auto const reverse : {false, true}) {
+    SCOPED_TRACE(reverse);
+    auto history = vehicle_observation_history{};
+    auto const current = std::array{observation(200, 200, "e1", "V")};
+    history.replace_feed("feed", current, 200, kPolicy);
+
+    auto replacement = std::array{observation(210, 210, "e2", "V"),
+                                  observation(210, 150, "e1", "W")};
+    if (reverse) {
+      std::swap(replacement[0], replacement[1]);
+    }
+    history.replace_feed("feed", replacement, 210, kPolicy);
+
+    ASSERT_NE(history.current_observation(descriptor_key("V")), nullptr);
+    EXPECT_EQ(history.current_observation(descriptor_key("V"))->entity_id_,
+              "e2");
+    ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+    EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_,
+              "e1");
+  }
+}
+
+TEST(vehicle_observation_history,
+     history_only_alternate_does_not_authorize_entity_reuse) {
+  for (auto const differential : {false, true}) {
+    for (auto const reverse : {false, true}) {
+      SCOPED_TRACE(differential);
+      SCOPED_TRACE(reverse);
+      auto history = vehicle_observation_history{};
+      auto const current = std::array{observation(200, 200, "e1", "V")};
+      history.replace_feed("feed", current, 200, kPolicy);
+
+      auto replacement = std::array{observation(210, 150, "e2", "V"),
+                                    observation(210, 210, "e1", "W")};
+      if (reverse) {
+        std::swap(replacement[0], replacement[1]);
+      }
+      if (differential) {
+        history.update_feed("feed", replacement, {}, 210, kPolicy);
+      } else {
+        history.replace_feed("feed", replacement, 210, kPolicy);
+      }
+
+      EXPECT_EQ(history.current_observation(descriptor_key("V")), nullptr);
+      EXPECT_TRUE(history.observations(descriptor_key("V")).empty());
+      ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+      EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_,
+                "e1");
+
+      auto const stale_entity = std::array<std::string, 1>{"e2"};
+      history.update_feed("feed", {}, stale_entity, 220, kPolicy);
+      ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+      auto const current_entity = std::array<std::string, 1>{"e1"};
+      history.update_feed("feed", {}, current_entity, 230, kPolicy);
+      EXPECT_EQ(history.current_observation(descriptor_key("W")), nullptr);
+    }
+  }
+}
+
+TEST(vehicle_observation_history,
+     differential_rejects_stale_alternate_evidence_in_both_orders) {
+  for (auto const reverse : {false, true}) {
+    SCOPED_TRACE(reverse);
+    auto history = vehicle_observation_history{};
+    auto const current =
+        std::array{observation(200, 200, "e1", "V", "next-trip")};
+    history.update_feed("feed", current, {}, 200, kPolicy);
+
+    auto update = std::array{observation(210, 150, "e2", "V", "trip"),
+                             observation(210, 210, "e1", "W", "trip")};
+    if (reverse) {
+      std::swap(update[0], update[1]);
+    }
+    history.update_feed("feed", update, {}, 210, kPolicy);
+
+    EXPECT_EQ(history.current_observation(descriptor_key("V")), nullptr);
+    EXPECT_TRUE(history.observations(descriptor_key("V")).empty());
+    ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+    EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_,
+              "e1");
+  }
+}
+
+TEST(vehicle_observation_history,
+     differential_reuse_of_old_entity_preserves_rotated_vehicle) {
+  auto history = vehicle_observation_history{};
+  auto const first = std::array{observation(100, 100, "e1", "V")};
+  history.update_feed("feed", first, {}, 100, kPolicy);
+  auto const rotated = std::array{observation(110, 110, "e2", "V")};
+  history.update_feed("feed", rotated, {}, 110, kPolicy);
+
+  auto const reused = std::array{observation(120, 120, "e1", "W")};
+  history.update_feed("feed", reused, {}, 120, kPolicy);
+
+  ASSERT_NE(history.current_observation(descriptor_key("V")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("V"))->entity_id_, "e2");
+  ASSERT_EQ(history.observations(descriptor_key("V")).size(), 2U);
+  ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_, "e1");
+}
+
+TEST(vehicle_observation_history,
+     differential_reuse_of_current_entity_ignores_stale_locator) {
+  auto history = vehicle_observation_history{};
+  auto const first = std::array{observation(100, 100, "e2", "V")};
+  history.update_feed("feed", first, {}, 100, kPolicy);
+  auto const rotated = std::array{observation(110, 110, "e1", "V")};
+  history.update_feed("feed", rotated, {}, 110, kPolicy);
+
+  auto const reused = std::array{observation(120, 120, "e1", "W")};
+  history.update_feed("feed", reused, {}, 120, kPolicy);
+
+  EXPECT_EQ(history.current_observation(descriptor_key("V")), nullptr);
+  EXPECT_TRUE(history.observations(descriptor_key("V")).empty());
+  ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_, "e1");
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_only_reused_entity_invalidates_absent_vehicle) {
+  auto history = vehicle_observation_history{};
+  auto const first = std::array{observation(100, 100, "e2", "V")};
+  history.replace_feed("feed", first, 100, kPolicy);
+  auto const rotated = std::array{observation(110, 110, "e1", "V")};
+  history.replace_feed("feed", rotated, 110, kPolicy);
+
+  auto const replacement = std::array{observation(120, 120, "e1", "W")};
+  history.replace_feed("feed", replacement, 120, kPolicy);
+
+  EXPECT_EQ(history.current_observation(descriptor_key("V")), nullptr);
+  EXPECT_TRUE(history.observations(descriptor_key("V")).empty());
+  ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_, "e1");
+}
+
+TEST(vehicle_observation_history,
+     full_replacement_does_not_preserve_omitted_current_vehicle) {
+  auto history = vehicle_observation_history{};
+  auto const first = std::array{observation(100, 100, "e1", "V")};
+  history.replace_feed("feed", first, 100, kPolicy);
+  auto const rotated = std::array{observation(110, 110, "e2", "V")};
+  history.replace_feed("feed", rotated, 110, kPolicy);
+
+  auto const replacement = std::array{observation(120, 120, "e1", "W")};
+  history.replace_feed("feed", replacement, 120, kPolicy);
+
+  EXPECT_EQ(history.current_observation(descriptor_key("V")), nullptr);
+  EXPECT_TRUE(history.observations(descriptor_key("V")).empty());
+  ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("W"))->entity_id_, "e1");
+}
+
+TEST(vehicle_observation_history,
+     differential_deletion_invalidates_current_but_preserves_short_history) {
+  auto history = vehicle_observation_history{};
+  auto const initial = std::array{observation(100, 100)};
+  history.update_feed("feed", initial, {}, 100, kPolicy);
+  ASSERT_NE(history.current_observation(descriptor_key()), nullptr);
+
+  auto const deleted = std::array<std::string, 1>{"entity"};
+  history.update_feed("feed", {}, deleted, 110, kPolicy);
+
+  EXPECT_EQ(history.current_observation(descriptor_key()), nullptr);
+  EXPECT_EQ(history.observations(descriptor_key()).size(), 1U);
+  history.prune(401, kPolicy);
+  EXPECT_TRUE(history.observations(descriptor_key()).empty());
+}
+
+TEST(vehicle_observation_history,
+     representative_fleet_remains_bounded_and_updates_within_budget) {
+  constexpr auto const fleet_size = std::size_t{1'000};
+  constexpr auto const cycles = std::size_t{20};
+  auto const policy = observation_history_policy{
+      .max_age_ = 10min, .max_observations_per_vehicle_ = cycles};
+  auto history = vehicle_observation_history{};
+  auto const started = std::chrono::steady_clock::now();
+
+  for (auto cycle = std::size_t{0}; cycle != cycles; ++cycle) {
+    auto batch = std::vector<vehicle_observation>{};
+    batch.reserve(fleet_size);
+    for (auto vehicle = std::size_t{0}; vehicle != fleet_size; ++vehicle) {
+      auto value = observation(static_cast<std::int64_t>(cycle),
+                               static_cast<std::int64_t>(cycle),
+                               "entity-" + std::to_string(vehicle),
+                               "vehicle-" + std::to_string(vehicle));
+      batch.emplace_back(std::move(value));
+    }
+    history.replace_feed("feed", batch, static_cast<std::int64_t>(cycle),
+                         policy);
+  }
+
+  auto const elapsed = std::chrono::steady_clock::now() - started;
+  EXPECT_EQ(history.active_histories(), fleet_size);
+  EXPECT_EQ(history.observation_count(), fleet_size * cycles);
+  EXPECT_LT(history.estimated_memory_bytes(), 64U * 1024U * 1024U);
+  EXPECT_LT(elapsed, 10s);
+}
+
+TEST(vehicle_observation_history,
+     differential_deletion_allows_older_time_entity_reuse) {
+  auto history = vehicle_observation_history{};
+  auto const initial = std::array{observation(200, 200, "e1", "V")};
+  history.update_feed("feed", initial, {}, 200, kPolicy);
+  auto const deleted = std::array<std::string, 1>{"e1"};
+  history.update_feed("feed", {}, deleted, 210, kPolicy);
+
+  auto const reused = std::array{observation(220, 150, "e1", "W")};
+  history.update_feed("feed", reused, {}, 220, kPolicy);
+
+  EXPECT_EQ(history.current_observation(descriptor_key("V")), nullptr);
+  EXPECT_TRUE(history.observations(descriptor_key("V")).empty());
+  ASSERT_NE(history.current_observation(descriptor_key("W")), nullptr);
+  EXPECT_EQ(history.current_observation(descriptor_key("W"))->reported_time_,
+            150);
+}
+
+TEST(vehicle_observation_history, rejects_observations_without_any_identity) {
+  auto history = vehicle_observation_history{};
+  EXPECT_FALSE(history.ingest(
+      observation(100, 100, "", std::optional<std::string>{""}), kPolicy));
+  EXPECT_EQ(history.active_histories(), 0U);
+}
+
+}  // namespace
+}  // namespace motis

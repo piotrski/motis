@@ -13,6 +13,14 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
   - `nigiri-test --gtest_filter='rt.gtfsrt_resolve_static_trip:rt.gtfsrt_resolve_adjacent_service_day'`
   - `nigiri-test --gtest_filter='rt.*'`
 
+### GTFS-RT service day inference
+
+- Status: still required
+- Source: `codex/live-vehicles-gps-v6` (PR #52), `src/rt/gtfsrt_service_day.cc`
+- Purpose: TripUpdate and VehiclePosition descriptors without `start_date` get the service day whose scheduled run is closest to the current time before nigiri resolves them. nigiri otherwise uses the UTC date as service date (and the adjacent-day patch above only as a fallback), which put night trips after UTC midnight on the next night's run. Descriptors whose trip id only has runs more than 20 hours away (ZTP Kraków names post-midnight runs with the next service day's trip id at schedule changes) are left as sent and logged; mapping them to the run actually operating needs a trip-equivalence rule (open).
+- Tests to run:
+  - `motis-test --gtest_filter='gtfsrt_service_day.*'`
+
 ### Precompute stop class masks
 
 - Status: still required
@@ -30,6 +38,21 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 - Tests to run:
   - `motis-test` `stop_times` coverage
   - exact child-platform `stoptimes` query returns departures when the station board contains events for that child stop
+
+### Live vehicles and GPS-derived predictions
+
+- Status: still required
+- Source: `codex/live-vehicles-gps-v6` (PR #52)
+- Purpose: expose identity-safe live vehicle observations and combine bounded GPS, provider, and schedule prediction candidates
+- API: v6 `trip` legs carry `arrivalPrediction` / `departurePrediction` on each stop visit (`from`, `to`, `intermediateStops`), scoped to that leg's run; the block-wide `startPrediction`, `endPrediction` and `intermediateStopEvents` stay for compatibility. `journey_to_response` takes an optional stop-event hook for this, so keep it when rebasing onto upstream.
+- Per-endpoint GTFS-RT counters (`/metrics`): `motis_gtfsrt_endpoint_total_entities_total`, `motis_gtfsrt_endpoint_trip_resolve_error_total` and `motis_gtfsrt_endpoint_vehicle_entities_total`, labelled `{tag, endpoint}`. `endpoint` is the last path segment of the feed URL (e.g. `TripUpdates_A.pb`; no query, userinfo or host; `[A-Za-z0-9._-]`, at most 64 characters; the endpoint's configuration index if the path is empty, suffixed with it if two endpoints of a dataset share a name). They only count messages fetched and applied in a cycle (no failed fetches, no last-good replays), unlike the per-dataset `nigiri_gtfsrt_*{tag}` counters where vehicle position entities count as successes. Unresolved trip share of a TripUpdates endpoint: `rate(..._trip_resolve_error_total) / rate(..._total_entities_total)`; vehicle position endpoints have `vehicle_entities` equal to `total_entities`.
+- Trip scope: v6 `trip` takes `withBlockLegs` (default `true`, upstream behaviour: the vehicle's whole block). `withBlockLegs=false` returns only the requested trip as one leg, and `startPrediction`, `endPrediction` and `intermediateStopEvents` then describe that trip. Only `src/endpoints/trip.cc` and the `tripV6` operation change.
+- Passed stops: feeds that only describe the stops ahead of a vehicle (ZTP Kraków) used to drop passed stops back to the schedule on every rebuild. `src/rt/passed_stops.cc` freezes each passed stop event at its last published time (the observed GPS passage when GPS was selected), capped at the moment the feed first omitted it and kept before the vehicle's next event, and writes it into the provider baseline every cycle while the trip stays in the feed. Predictions for those events carry `status: PASSED`. In memory only: a restart loses frozen times of stops passed before it.
+- Tests to run:
+  - `motis-test --gtest_filter='motis_vehicle_positions.*:vehicle_prediction*.*:trip_progress_projection.*'`
+  - `motis-test --gtest_filter='motis.stop_times:motis.trip*:motis_rt_update.*'`
+  - `motis-test --gtest_filter='passed_stops.*:motis_rt_update.passed_stops*'`
+  - full `motis-test`
 
 ## Resolved Upstream
 

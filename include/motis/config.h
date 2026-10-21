@@ -1,11 +1,14 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
 #include <map>
 #include <optional>
 #include <set>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -14,9 +17,13 @@
 
 #include "utl/verify.h"
 
+#include "nigiri/types.h"
+
 namespace motis {
 
 using headers_t = std::map<std::string, std::string>;
+
+[[nodiscard]] nigiri::clasz parse_vehicle_eta_clasz(std::string_view);
 
 struct config {
   friend std::ostream& operator<<(std::ostream&, config const&);
@@ -34,6 +41,7 @@ struct config {
   bool has_elevators() const;
   bool has_rt_feeds() const;
   bool use_street_routing() const;
+  bool vehicle_eta_enabled() const;
 
   bool operator==(config const&) const = default;
 
@@ -72,6 +80,7 @@ struct config {
         }
         std::string url_;
         std::optional<headers_t> headers_{};
+        unsigned last_good_ttl_{180U};
 
         enum struct protocol { gtfsrt, auser, siri, siri_json };
         protocol protocol_{protocol::gtfsrt};
@@ -117,6 +126,44 @@ struct config {
       std::optional<shapes_debug> debug_{};
     };
 
+    struct vehicle_eta {
+      enum class mode { off, shadow, effective };
+
+      struct history {
+        bool operator==(history const&) const = default;
+
+        std::int64_t max_age_seconds_{300};
+        std::int64_t retention_seconds_{900};
+        std::int64_t max_observation_gap_seconds_{120};
+        std::size_t max_observations_per_vehicle_{20U};
+      };
+
+      struct feed {
+        bool operator==(feed const&) const = default;
+
+        std::optional<std::vector<std::string>> modes_{};
+        mode mode_{mode::off};
+      };
+
+      struct selection {
+        bool operator==(selection const&) const = default;
+
+        double min_gps_confidence_{0.5};
+        double min_selected_gps_confidence_{0.35};
+        std::int64_t provider_timestamp_tolerance_seconds_{120};
+        std::int64_t early_departure_tolerance_seconds_{0};
+        std::int64_t minute_rounding_deadband_seconds_{10};
+      };
+
+      bool operator==(vehicle_eta const&) const = default;
+
+      mode mode_{mode::off};
+      history history_{};
+      selection selection_{};
+      std::map<std::string, mode> modes_{};
+      std::map<std::string, feed> feeds_{};
+    };
+
     bool operator==(timetable const&) const = default;
 
     std::string first_day_{"TODAY"};
@@ -142,8 +189,12 @@ struct config {
     std::map<std::string, dataset> datasets_{};
     std::optional<std::filesystem::path> assistance_times_{};
     std::optional<route_shapes> route_shapes_{};
+    std::optional<vehicle_eta> vehicle_eta_{};
   };
   std::optional<timetable> timetable_{};
+
+  timetable::vehicle_eta::mode vehicle_eta_mode(
+      std::string_view feed, nigiri::clasz transit_mode) const;
 
   struct gbfs {
     bool operator==(gbfs const&) const = default;

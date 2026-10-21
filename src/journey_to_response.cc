@@ -272,7 +272,8 @@ api::Itinerary journey_to_response(
     bool const ignore_dest_rental_return_constraints,
     n::lang_t const& lang,
     n::routing::query const* leg_alternatives_query,
-    std::size_t const num_leg_alternatives) {
+    std::size_t const num_leg_alternatives,
+    transit_stop_event_hook_t const& on_transit_stop_event) {
   utl::verify(!j.legs_.empty(), "journey without legs");
 
   auto const fares =
@@ -590,6 +591,12 @@ api::Itinerary journey_to_response(
                 leg.to_.vertexType_ = api::VertexTypeEnum::TRANSIT;
                 leg.to_.arrival_ = leg.endTime_;
                 leg.to_.scheduledArrival_ = leg.scheduledEndTime_;
+                if (on_transit_stop_event) {
+                  on_transit_stop_event(leg.from_, enter_stop,
+                                        n::event_type::kDep);
+                  on_transit_stop_event(leg.to_, exit_stop,
+                                        n::event_type::kArr);
+                }
                 if (detailed_legs) {
                   auto polyline = geo::polyline{};
                   fr.for_each_shape_point(shapes, common_stops,
@@ -624,6 +631,10 @@ api::Itinerary journey_to_response(
                   p.arrival_ = stop.time(n::event_type::kArr);
                   p.scheduledArrival_ =
                       stop.scheduled_time(n::event_type::kArr);
+                  if (on_transit_stop_event) {
+                    on_transit_stop_event(p, stop, n::event_type::kArr);
+                    on_transit_stop_event(p, stop, n::event_type::kDep);
+                  }
                 }
                 is_first_part = false;
               };
