@@ -151,8 +151,17 @@ void hub::on_open(net::ws_session_ptr const& ws, std::string const& target) {
 void hub::on_msg(net::ws_session_ptr const& ws,
                  std::string const& msg,
                  net::ws_msg_type) {
-  asio::post(strand_, [self = shared_from_this(), ws, msg]() {
-    self->handle_msg(ws, msg);
+  // Checked before queueing, so a flooding peer cannot grow the strand queue.
+  if (n_pending_messages_.fetch_add(1U) >= settings_.max_pending_messages_) {
+    n_pending_messages_.fetch_sub(1U);
+    n_dropped_messages_.fetch_add(1U);
+    return;
+  }
+  auto const too_large = msg.size() > settings_.max_message_size_;
+  asio::post(strand_, [self = shared_from_this(), ws,
+                       payload = too_large ? std::string{} : msg, too_large]() {
+    self->n_pending_messages_.fetch_sub(1U);
+    self->handle_msg(ws, payload, too_large);
   });
 }
 
@@ -172,6 +181,12 @@ hub::connection* hub::find_or_add(net::ws_session_ptr const& ws,
   if (auto const it = by_session_.find(session.get());
       it != end(by_session_)) {
     return &connections_.at(it->second);
+  }
+
+  if (connections_.size() >= settings_.max_connections_) {
+    // More upgrades passed accepts_upgrade concurrently than the cap allows.
+    n_rejected_.fetch_add(1U);
+    return nullptr;
   }
 
   auto const id = next_id_++;
@@ -198,7 +213,9 @@ hub::connection* hub::find_or_add(net::ws_session_ptr const& ws,
   return &c;
 }
 
-void hub::handle_msg(net::ws_session_ptr const& ws, std::string const& msg) {
+void hub::handle_msg(net::ws_session_ptr const& ws,
+                     std::string const& msg,
+                     bool const too_large) {
   auto* c = find_or_add(ws, nullptr);
   if (c == nullptr) {
     return;
@@ -209,7 +226,7 @@ void hub::handle_msg(net::ws_session_ptr const& ws, std::string const& msg) {
     pump(*c);
   };
 
-  if (msg.size() > settings_.max_message_size_) {
+  if (too_large) {
     return error("message too large");
   }
   auto ec = boost::system::error_code{};
@@ -239,7 +256,16 @@ void hub::subscribe(connection& c, parse_result&& result) {
     pump(c);
     return;
   }
-  c.state_.sub_ = std::get<subscription>(std::move(result));
+  auto sub = std::get<subscription>(std::move(result));
+  if (!cycles_.contains(lang_key(sub.language_)) &&
+      cycles_.size() >= settings_.max_languages_) {
+    c.control_ = control({{"type", "error"},
+                          {"sub", sub.id_},
+                          {"message", "too many languages in use"}});
+    pump(c);
+    return;
+  }
+  c.state_.sub_ = std::move(sub);
   c.dirty_ = true;
   pump(c);
 }
@@ -283,19 +309,21 @@ void hub::poll() {
     last_published_at_ms_ = published_at_ms_;
     cycles_.clear();
     n_cycles_.fetch_add(1U);
-    for (auto& [id, c] : connections_) {
-      if (!c.state_.sub_.has_value()) {
-        continue;
-      }
-      if (c.in_flight_ && c.dirty_) {
-        n_coalesced_.fetch_add(1U);
-      }
-      c.dirty_ = true;
-      pump(c);
-    }
+    last_tick_ = std::chrono::steady_clock::now();
+    refresh_all();
   }
 
   auto const steady_now = std::chrono::steady_clock::now();
+  // Without a new cycle (feeds down, RT update failing), still drop vehicles
+  // that went stale once per update interval, as a poll would.
+  if (current_.lock() != nullptr &&
+      steady_now - last_tick_ >=
+          std::chrono::seconds{settings_.limits_.update_interval_}) {
+    last_tick_ = steady_now;
+    n_ticks_.fetch_add(1U);
+    refresh_all();
+  }
+
   for (auto& [id, c] : connections_) {
     if (!c.in_flight_ && !c.control_.has_value() &&
         steady_now - c.last_send_ > settings_.heartbeat_interval_) {
@@ -304,6 +332,19 @@ void hub::poll() {
       n_heartbeats_.fetch_add(1U);
       pump(c);
     }
+  }
+}
+
+void hub::refresh_all() {
+  for (auto& [id, c] : connections_) {
+    if (!c.state_.sub_.has_value()) {
+      continue;
+    }
+    if (c.in_flight_ && c.dirty_) {
+      n_coalesced_.fetch_add(1U);
+    }
+    c.dirty_ = true;
+    pump(c);
   }
 }
 
@@ -408,6 +449,8 @@ json::object hub::stats() const {
           {"heartbeats", n_heartbeats_.load()},
           {"coalesced", n_coalesced_.load()},
           {"rejected", n_rejected_.load()},
+          {"ticks", n_ticks_.load()},
+          {"droppedMessages", n_dropped_messages_.load()},
           {"bytesSent", n_bytes_.load()},
           {"rawBytes", n_raw_bytes_.load()},
           {"lastPublishedAt", last_published_at_ms_.load()},

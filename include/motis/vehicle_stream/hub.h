@@ -42,6 +42,10 @@ struct settings {
   std::chrono::seconds heartbeat_interval_{25};
   std::size_t max_connections_{1000U};
   std::size_t max_message_size_{4096U};
+  // Messages received but not handled yet, over all connections.
+  std::size_t max_pending_messages_{1024U};
+  // Distinct languages serialized per cycle.
+  std::size_t max_languages_{4U};
   limits limits_{};
   std::function<std::int64_t()> now_{};  // unix seconds, for tests
 };
@@ -88,10 +92,13 @@ private:
 
   connection* find_or_add(net::ws_session_ptr const&,
                           std::string const* target);
-  void handle_msg(net::ws_session_ptr const&, std::string const&);
+  void handle_msg(net::ws_session_ptr const&,
+                  std::string const&,
+                  bool too_large);
   void subscribe(connection&, parse_result&&);
   void remove(std::uint64_t id);
   void poll();
+  void refresh_all();
   void schedule();
   cycle const* cycle_for(subscription const&);
   void pump(connection&);
@@ -111,10 +118,14 @@ private:
 
   std::weak_ptr<void const> current_;
   std::uint64_t cycle_id_{0U};
+  std::chrono::steady_clock::time_point last_tick_{};
   std::int64_t published_at_ms_{0};
   std::map<std::string, cycle> cycles_;
 
   std::atomic_size_t n_connections_{0U};
+  std::atomic_size_t n_pending_messages_{0U};
+  std::atomic_uint64_t n_ticks_{0U};
+  std::atomic_uint64_t n_dropped_messages_{0U};
   std::atomic_uint64_t n_cycles_{0U};
   std::atomic_uint64_t n_snapshots_{0U};
   std::atomic_uint64_t n_deltas_{0U};

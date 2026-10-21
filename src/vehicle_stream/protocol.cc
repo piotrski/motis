@@ -17,6 +17,9 @@ namespace motis::vehicle_stream {
 
 namespace {
 
+constexpr auto kMaxLanguages = std::size_t{4U};
+constexpr auto kMaxLanguageLength = std::size_t{16U};
+
 std::optional<geo::latlng> parse_coordinate(std::string_view const s) {
   auto const location = parse_location(s);
   if (!location.has_value()) {
@@ -99,10 +102,13 @@ parse_result parse_subscription(json::object const& o) {
     }
     auto languages = std::vector<std::string>{};
     for (auto const& l : it->value().as_array()) {
-      if (!l.is_string()) {
-        return std::string{"language must be an array of strings"};
+      if (!l.is_string() || l.as_string().size() > kMaxLanguageLength) {
+        return std::string{"language must be an array of short strings"};
       }
       languages.emplace_back(l.as_string());
+    }
+    if (languages.size() > kMaxLanguages) {
+      return std::string{"too many languages"};
     }
     sub.language_ = std::move(languages);
   }

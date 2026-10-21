@@ -329,7 +329,7 @@ std::string gunzip(std::string const& in) {
 }
 
 struct hub_fixture {
-  hub_fixture()
+  explicit hub_fixture(settings s = {})
       : hub_{std::make_shared<hub>(
             ioc_,
             source{.current_ = [this]() -> std::shared_ptr<void const> {
@@ -341,8 +341,11 @@ struct hub_fixture {
                          ++builds_;
                          return build(current);
                        }},
-            settings{.heartbeat_interval_ = std::chrono::hours{1},
-                     .now_ = [] { return kNow; }})} {}
+            [&] {
+              s.heartbeat_interval_ = std::chrono::hours{1};
+              s.now_ = [this] { return now_; };
+              return s;
+            }())} {}
 
   void run() {
     ioc_.restart();
@@ -367,6 +370,7 @@ struct hub_fixture {
   }
 
   boost::asio::io_context ioc_;
+  std::int64_t now_{kNow};
   std::shared_ptr<fake_rt> rt_;
   int builds_{0};
   std::shared_ptr<hub> hub_;
@@ -486,4 +490,61 @@ TEST(motis_vehicle_stream, hub_gzips_when_asked_and_forgets_closed_sessions) {
   session.reset();
   f.run();
   EXPECT_EQ(0U, f.hub_->stats().at("connections").as_uint64());
+}
+
+TEST(motis_vehicle_stream, hub_drops_stale_vehicles_when_no_cycle_is_published) {
+  // update interval 0: every poll without a new cycle is a freshness tick.
+  auto f = hub_fixture{settings{.limits_ = {.default_max_age_ = 60,
+                                            .update_interval_ = 0U}}};
+  f.publish({{"a", 50.05, 19.9, kNow - 10}, {"b", 50.06, 19.9, kNow - 50}});
+  auto const session = f.open(kKrakow);
+  session->complete();
+  f.run();
+
+  // Realtime stops publishing; 20 s later b is older than maxAge.
+  f.now_ = kNow + 20;
+  f.hub_->poll_now();
+  f.run();
+  ASSERT_EQ(1U, session->pending());
+  auto const tick = f.last(*session);
+  EXPECT_EQ("delta", tick.at("type").as_string());
+  EXPECT_EQ(1, tick.at("cycle").as_int64());
+  EXPECT_EQ(std::vector<std::string>{"feed:b"},
+            keys(tick.at("removes").as_array()));
+  EXPECT_LE(1U, f.hub_->stats().at("ticks").as_uint64());
+}
+
+TEST(motis_vehicle_stream, hub_bounds_languages_connections_and_inbound_messages) {
+  auto f = hub_fixture{settings{.max_connections_ = 1U,
+                                .max_pending_messages_ = 2U,
+                                .max_languages_ = 1U}};
+  f.publish({{"a", 50.05, 19.9, kNow - 10}});
+
+  auto const first = f.open(kKrakow + "&language=pl");
+  EXPECT_EQ("snapshot", f.last(*first).at("type").as_string());
+  first->complete();
+  f.run();
+
+  // A second language would need a second serialization of the cycle.
+  f.hub_->on_msg(first,
+                 R"({"type":"subscribe","id":"2","min":"50.0,19.8","max":"50.1,20.0","language":["de"]})",
+                 net::ws_msg_type::TEXT);
+  f.run();
+  EXPECT_EQ("error", f.last(*first).at("type").as_string());
+  EXPECT_EQ(1, f.builds_);
+  first->complete();
+  f.run();
+
+  // Over the connection cap: never registered, never sent anything.
+  auto const second = f.open(kKrakow);
+  EXPECT_EQ(0U, second->pending());
+  EXPECT_EQ(1U, f.hub_->stats().at("connections").as_uint64());
+  EXPECT_EQ(1U, f.hub_->stats().at("rejected").as_uint64());
+
+  // Messages beyond the pending cap are dropped before they are queued.
+  for (auto i = 0; i != 5; ++i) {
+    f.hub_->on_msg(first, R"({"type":"ping"})", net::ws_msg_type::TEXT);
+  }
+  EXPECT_EQ(3U, f.hub_->stats().at("droppedMessages").as_uint64());
+  f.run();
 }
