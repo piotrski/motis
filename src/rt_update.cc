@@ -1000,14 +1000,21 @@ void run_rt_update(boost::asio::io_context& ioc,
             if (dataset.rt_.has_value()) {
               auto const src = d.tags_->get_src(tag);
               auto gtfsrt_endpoint_idx = 0U;
+              auto endpoint_labels = std::set<std::string>{};
               for (auto const& ep : *dataset.rt_) {
                 switch (ep.protocol_) {
                   case config::timetable::dataset::rt::protocol::gtfsrt: {
                     auto const endpoint_id =
                         std::to_string(gtfsrt_endpoint_idx++);
-                    endpoints.push_back(gtfs_rt_endpoint{
-                        ep, src, tag,
-                        gtfsrt_metrics{tag, endpoint_id, metric_families}});
+                    auto label = gtfsrt_endpoint_label(ep.url_, endpoint_id);
+                    if (!endpoint_labels.insert(label).second) {
+                      label = fmt::format("{}-{}", label, endpoint_id);
+                      endpoint_labels.insert(label);
+                    }
+                    endpoints.push_back(
+                        gtfs_rt_endpoint{ep, src, tag,
+                                         gtfsrt_metrics{tag, endpoint_id, label,
+                                                        metric_families}});
                     break;
                   }
                   case config::timetable::dataset::rt::protocol::siri_json:

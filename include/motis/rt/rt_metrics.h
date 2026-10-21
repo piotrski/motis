@@ -1,6 +1,13 @@
 #pragma once
 
 #include <string>
+#include <string_view>
+
+#ifdef NO_DATA
+#undef NO_DATA
+#endif
+#include "nigiri/rt/gtfsrt_update.h"
+#include "nigiri/rt/vdv_aus.h"
 
 #include "prometheus/counter.h"
 #include "prometheus/family.h"
@@ -85,6 +92,24 @@ struct rt_metric_families {
             prometheus::BuildCounter()
                 .Name("nigiri_gtfsrt_trip_resolve_error_total")
                 .Help("Number of unresolved trips in the GTFS-RT feed")
+                .Register(registry)},
+        gtfsrt_endpoint_total_entities_{
+            prometheus::BuildCounter()
+                .Name("motis_gtfsrt_endpoint_total_entities_total")
+                .Help("Entities of successfully fetched GTFS-RT messages, per "
+                      "endpoint")
+                .Register(registry)},
+        gtfsrt_endpoint_trip_resolve_error_{
+            prometheus::BuildCounter()
+                .Name("motis_gtfsrt_endpoint_trip_resolve_error_total")
+                .Help("Trip updates of successfully fetched GTFS-RT messages "
+                      "whose trip could not be resolved, per endpoint")
+                .Register(registry)},
+        gtfsrt_endpoint_vehicle_entities_{
+            prometheus::BuildCounter()
+                .Name("motis_gtfsrt_endpoint_vehicle_entities_total")
+                .Help("Vehicle position entities of successfully fetched "
+                      "GTFS-RT messages, per endpoint")
                 .Register(registry)},
         gtfsrt_unsupported_schedule_relationship_{
             prometheus::BuildCounter()
@@ -379,6 +404,9 @@ struct rt_metric_families {
   prometheus::Family<prometheus::Counter>& gtfsrt_no_trip_update_;
   prometheus::Family<prometheus::Counter>& gtfsrt_trip_update_without_trip_;
   prometheus::Family<prometheus::Counter>& gtfsrt_trip_resolve_error_;
+  prometheus::Family<prometheus::Counter>& gtfsrt_endpoint_total_entities_;
+  prometheus::Family<prometheus::Counter>& gtfsrt_endpoint_trip_resolve_error_;
+  prometheus::Family<prometheus::Counter>& gtfsrt_endpoint_vehicle_entities_;
   prometheus::Family<prometheus::Counter>&
       gtfsrt_unsupported_schedule_relationship_;
   prometheus::Family<prometheus::Gauge>& gtfsrt_feed_timestamp_;
@@ -440,9 +468,43 @@ struct rt_metric_families {
 
 enum struct gtfsrt_source_state { no_base, live, replay, expired };
 
+// Bounded, credential-free metric label for a GTFS-RT endpoint: the last
+// segment of the URL path (e.g. "TripUpdates_A.pb"), without scheme,
+// userinfo, host, query or fragment, restricted to [A-Za-z0-9._-] and 64
+// characters. `fallback` if the path has no segment.
+inline std::string gtfsrt_endpoint_label(std::string_view url,
+                                         std::string_view const fallback) {
+  if (auto const scheme = url.find("://"); scheme != std::string_view::npos) {
+    url.remove_prefix(scheme + 3U);
+  }
+  url = url.substr(0U, url.find_first_of("?#"));
+  auto const path = url.find('/');
+  url = path == std::string_view::npos ? std::string_view{} : url.substr(path);
+  while (!url.empty() && url.back() == '/') {
+    url.remove_suffix(1U);
+  }
+  auto segment = url.substr(url.rfind('/') + 1U);
+  auto label = std::string{};
+  for (auto const c : segment.substr(0U, 64U)) {
+    auto const allowed = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                         (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+                         c == '-';
+    label.push_back(allowed ? c : '_');
+  }
+  return label.empty() ? std::string{fallback} : label;
+}
+
 struct gtfsrt_metrics {
   explicit gtfsrt_metrics(std::string const& tag,
                           std::string const& endpoint,
+                          rt_metric_families const& m)
+      : gtfsrt_metrics{tag, endpoint, endpoint, m} {}
+
+  // `endpoint` labels the source event/state families (configuration
+  // index), `endpoint_label` the per-endpoint entity counters.
+  explicit gtfsrt_metrics(std::string const& tag,
+                          std::string const& endpoint,
+                          std::string const& endpoint_label,
                           rt_metric_families const& m)
       : updates_requested_{m.gtfsrt_updates_requested_.Add({{"tag", tag}})},
         updates_successful_{m.gtfsrt_updates_successful_.Add({{"tag", tag}})},
@@ -496,7 +558,13 @@ struct gtfsrt_metrics {
         cache_age_{m.gtfsrt_source_cache_age_.Add(
             {{"tag", tag}, {"endpoint", endpoint}})},
         cache_fresh_{m.gtfsrt_source_cache_fresh_.Add(
-            {{"tag", tag}, {"endpoint", endpoint}})} {
+            {{"tag", tag}, {"endpoint", endpoint}})},
+        endpoint_total_entities_{m.gtfsrt_endpoint_total_entities_.Add(
+            {{"tag", tag}, {"endpoint", endpoint_label}})},
+        endpoint_trip_resolve_error_{m.gtfsrt_endpoint_trip_resolve_error_.Add(
+            {{"tag", tag}, {"endpoint", endpoint_label}})},
+        endpoint_vehicle_entities_{m.gtfsrt_endpoint_vehicle_entities_.Add(
+            {{"tag", tag}, {"endpoint", endpoint_label}})} {
     set_source_state(gtfsrt_source_state::no_base, 0.0, false);
   }
 
@@ -511,7 +579,12 @@ struct gtfsrt_metrics {
     cache_fresh_.Set(fresh ? 1.0 : 0.0);
   }
 
+  // Only called for messages fetched and applied in this cycle (not for
+  // failed fetches or last-good replays).
   void update(nigiri::rt::statistics const& stats) const {
+    endpoint_total_entities_.Increment(stats.total_entities_);
+    endpoint_trip_resolve_error_.Increment(stats.trip_resolve_error_);
+    endpoint_vehicle_entities_.Increment(stats.total_vehicles_);
     total_entities_.Increment(stats.total_entities_);
     total_entities_success_.Increment(stats.total_entities_success_);
     total_entities_fail_.Increment(stats.total_entities_fail_);
@@ -556,6 +629,9 @@ struct gtfsrt_metrics {
   prometheus::Gauge& state_expired_;
   prometheus::Gauge& cache_age_;
   prometheus::Gauge& cache_fresh_;
+  prometheus::Counter& endpoint_total_entities_;
+  prometheus::Counter& endpoint_trip_resolve_error_;
+  prometheus::Counter& endpoint_vehicle_entities_;
 };
 
 struct vdvaus_metrics {

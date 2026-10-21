@@ -35,6 +35,7 @@
 #include "motis/endpoints/trip.h"
 #include "motis/import.h"
 #include "motis/metrics_registry.h"
+#include "motis/rt/rt_metrics.h"
 #include "motis/rt_update.h"
 
 #include "util.h"
@@ -1543,6 +1544,118 @@ service-1,{},1
   }
   ioc.stop();
   EXPECT_EQ(server.requests(), 3U);
+}
+
+TEST(motis_rt_update, gtfsrt_endpoint_label_is_bounded_and_credential_free) {
+  EXPECT_EQ("TripUpdates_A.pb",
+            gtfsrt_endpoint_label(
+                "https://gtfs.ztp.krakow.pl/TripUpdates_A.pb", "0"));
+  EXPECT_EQ("VehiclePositions.pb",
+            gtfsrt_endpoint_label("https://user:secret@example.com/rt/"
+                                  "VehiclePositions.pb?key=secret#x",
+                                  "1"));
+  EXPECT_EQ("rt", gtfsrt_endpoint_label("http://host:8080/feeds/rt/", "2"));
+  EXPECT_EQ("3", gtfsrt_endpoint_label("https://example.com", "3"));
+  EXPECT_EQ("4", gtfsrt_endpoint_label("https://example.com/?key=x", "4"));
+  EXPECT_EQ("a_20b_c.pb", gtfsrt_endpoint_label("https://h/a%20b c.pb", "5"));
+  EXPECT_EQ(64U,
+            gtfsrt_endpoint_label("https://h/" + std::string(100U, 'x'), "6")
+                .size());
+}
+
+TEST(motis_rt_update, counts_entities_and_resolve_errors_per_endpoint) {
+  auto const test_dir = fs::absolute("test/data/rt-endpoint-metrics");
+  auto ec = std::error_code{};
+  fs::remove_all(test_dir, ec);
+  fs::create_directories(test_dir);
+  auto cwd = cwd_guard{test_dir};
+  auto const today =
+      std::chrono::floor<date::days>(std::chrono::system_clock::now());
+  auto const service_date = date::format("%Y%m%d", today);
+  auto const gtfs = std::vformat(kGtfs, std::make_format_args(service_date));
+
+  // TripUpdates: one resolvable and one unknown trip, then a malformed body
+  // (a failed update must not count).
+  auto trip_updates = to_feed_msg(
+      {trip_update{.trip_ = {.trip_id_ = "trip-1",
+                             .start_time_ = "10:00:00",
+                             .date_ = service_date},
+                   .stop_updates_ = {{.stop_id_ = "stop-1",
+                                      .seq_ = 1U,
+                                      .delay_minutes_ = 1}}},
+       trip_update{.trip_ = {.trip_id_ = "missing-trip",
+                             .start_time_ = "10:00:00",
+                             .date_ = service_date},
+                   .stop_updates_ = {{.stop_id_ = "stop-1",
+                                      .seq_ = 1U,
+                                      .delay_minutes_ = 1}}}},
+      today + 9h);
+  trip_updates.mutable_header()->clear_timestamp();
+  auto trip_updates_server = response_server{
+      std::vector{trip_updates.SerializeAsString(), std::string{"malformed"}},
+      0ms};
+
+  // VehiclePositions: one vehicle entity, twice.
+  auto positions = transit_realtime::FeedMessage{};
+  positions.mutable_header()->set_gtfs_realtime_version("2.0");
+  auto* const vehicle = positions.add_entity();
+  vehicle->set_id("v1");
+  vehicle->mutable_vehicle()->mutable_trip()->set_trip_id("trip-1");
+  vehicle->mutable_vehicle()->mutable_vehicle()->set_id("bus-1");
+  vehicle->mutable_vehicle()->mutable_position()->set_latitude(50.061F);
+  vehicle->mutable_vehicle()->mutable_position()->set_longitude(19.938F);
+  auto positions_server = response_server{
+      std::vector{positions.SerializeAsString(), positions.SerializeAsString()},
+      0ms};
+
+  auto const with_path = [](std::string url, std::string_view const path) {
+    return url.replace(url.rfind("/rt"), 3U, path);
+  };
+  auto const c = config{
+      .timetable_ = {config::timetable{
+          .first_day_ = date::format("%F", today),
+          .num_days_ = 2,
+          .update_interval_ = 1,
+          .datasets_ = {
+              {"test",
+               {.path_ = gtfs,
+                .rt_ = {{{.url_ = with_path(trip_updates_server.url(),
+                                            "/feeds/TripUpdates_X.pb"
+                                            "?key=secret")},
+                         {.url_ = with_path(positions_server.url(),
+                                            "/feeds/VehiclePositions_X.pb"
+                                            "?key=secret")}}}}}}}},
+      .street_routing_ = false};
+  import(c, "data");
+  auto d = data{"data", c};
+  auto ioc = boost::asio::io_context{};
+  run_rt_update(ioc, c, d);
+  ioc.run_for(500ms);
+  ioc.restart();
+  ioc.run_for(1100ms);
+  ioc.stop();
+  EXPECT_EQ(trip_updates_server.requests(), 2U);
+  EXPECT_EQ(positions_server.requests(), 2U);
+
+  auto const metrics =
+      prometheus::TextSerializer{}.Serialize(d.metrics_->registry_.Collect());
+  auto const value = [&](std::string_view const name,
+                         std::string_view const endpoint) {
+    return metric_total(
+        metrics,
+        std::format("{}{{endpoint=\"{}\",tag=\"test\"}}", name, endpoint));
+  };
+  constexpr auto kEntities = "motis_gtfsrt_endpoint_total_entities_total";
+  constexpr auto kResolveErrors =
+      "motis_gtfsrt_endpoint_trip_resolve_error_total";
+  constexpr auto kVehicles = "motis_gtfsrt_endpoint_vehicle_entities_total";
+  EXPECT_EQ(value(kEntities, "TripUpdates_X.pb"), 2.0);
+  EXPECT_EQ(value(kResolveErrors, "TripUpdates_X.pb"), 1.0);
+  EXPECT_EQ(value(kVehicles, "TripUpdates_X.pb"), 0.0);
+  EXPECT_EQ(value(kEntities, "VehiclePositions_X.pb"), 2.0);
+  EXPECT_EQ(value(kResolveErrors, "VehiclePositions_X.pb"), 0.0);
+  EXPECT_EQ(value(kVehicles, "VehiclePositions_X.pb"), 2.0);
+  EXPECT_EQ(metrics.find("secret"), std::string::npos);
 }
 
 }  // namespace
