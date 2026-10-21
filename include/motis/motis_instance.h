@@ -40,6 +40,7 @@
 #include "motis/gbfs/update.h"
 #include "motis/metrics_registry.h"
 #include "motis/rt_update.h"
+#include "motis/vehicle_stream/hub.h"
 
 namespace motis {
 
@@ -165,6 +166,15 @@ struct motis_instance {
               ep::metrics{d.tt_.get(), d.tags_.get(), d.rt_, d.metrics_.get()});
     qr_.route("GET", "/gtfsrt",
               ep::gtfsrt{c, d.tt_.get(), d.tags_.get(), d.rt_});
+    if constexpr (requires(Executor& e) { e.io_; }) {
+      // `io_` is a reference, still valid after `exec` was moved into `qr_`.
+      vehicle_stream_ = vehicle_stream::hub::create(exec.io_, d, c);
+      qr_.get(std::string{vehicle_stream::kPath} + "/stats",
+              [s = vehicle_stream_](boost::urls::url_view const&) {
+                return s->stats();
+              });
+    }
+
     qr_.serve_files(c.server_.value_or(config::server{}).web_folder_);
     qr_.enable_cors();
   }
@@ -184,6 +194,10 @@ struct motis_instance {
   }
 
   void run(data& d, config const& c) {
+    if (vehicle_stream_ != nullptr) {
+      vehicle_stream_->start();
+    }
+
     if (d.w_ && d.l_ && c.has_gbfs_feeds()) {
       gbfs_ = io_thread{"motis gbfs update", [&](boost::asio::io_context& ioc) {
                           gbfs::run_gbfs_update(ioc, c, *d.w_, *d.l_, d.gbfs_,
@@ -199,6 +213,9 @@ struct motis_instance {
   }
 
   void stop() {
+    if (vehicle_stream_ != nullptr) {
+      vehicle_stream_->stop();
+    }
     rt_.stop();
     gbfs_.stop();
   }
@@ -209,6 +226,7 @@ struct motis_instance {
   }
 
   net::query_router<Executor> qr_{};
+  std::shared_ptr<vehicle_stream::hub> vehicle_stream_;
   io_thread rt_, gbfs_;
 };
 

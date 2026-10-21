@@ -42,6 +42,17 @@ int server(data d, config const& c, std::string_view const motis_version) {
   auto s = net::web_server{scheduler.runner_.ios()};
   s.set_timeout(std::chrono::minutes{5});
   s.on_http_request(m.qr_);
+  s.on_upgrade_ok([&](net::web_server::http_req_t const& req) {
+    auto const target = req.target();
+    return m.vehicle_stream_->accepts_upgrade(
+        std::string_view{target.data(), target.size()});
+  });
+  s.on_ws_open([&](net::ws_session_ptr session, std::string const& target,
+                   bool) { m.vehicle_stream_->on_open(session, target); });
+  s.on_ws_msg([&](net::ws_session_ptr session, std::string const& msg,
+                  net::ws_msg_type type) {
+    m.vehicle_stream_->on_msg(session, msg, type);
+  });
 
   auto ec = boost::system::error_code{};
   auto const server_config = c.server_.value_or(config::server{});
