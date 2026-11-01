@@ -13,6 +13,15 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
   - `nigiri-test --gtest_filter='rt.gtfsrt_resolve_static_trip:rt.gtfsrt_resolve_adjacent_service_day'`
   - `nigiri-test --gtest_filter='rt.*'`
 
+### GTFS-RT block trip terminal departure
+
+- Status: still required. Drop it once the fork is rebased onto upstream nigiri at or after `18bf63c` (#419), which contains the same guard and `pred` initialisation; keep the order-independence tests passing when doing so.
+- Source: `piotrski/nigiri@fix/gtfsrt-block-terminal-departure` (on top of the adjacent service-day patch; `.pkg` pins `branch=fix/gtfsrt-adjacent-service-day`, which is fast-forwarded to the pinned commit)
+- Purpose: trips of a GTFS block share the terminal stop; an incoming trip's arrival delay must not overwrite the next trip's departure there (Kraków line 70 at Pleszów showed 21:34 for a 21:39 departure). A late arrival still holds the departure, but only the outgoing trip's own delay propagates along that trip, independent of the order of the trips' updates. A later update that starts after a trip's first stop keeps that stop's existing prediction (backport of the #419 `pred` initialisation).
+- Tests to run:
+  - `nigiri-test --gtest_filter='rt.block_terminal*:join_split.*'`
+  - `nigiri-test --gtest_filter='rt.*'`
+
 ### Precompute stop class masks
 
 - Status: still required
