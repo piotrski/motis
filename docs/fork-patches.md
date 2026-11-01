@@ -15,7 +15,8 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 
 ### GTFS-RT block trip terminal departure
 
-- Status: still required. Drop it once the fork is rebased onto upstream nigiri at or after `18bf63c` (#419), which contains the same guard and `pred` initialisation; keep the order-independence tests passing when doing so.
+- Status: still required, even after rebasing onto upstream nigiri `18bf63c` (#419). Upstream contains the same terminal guard and `pred` initialisation, but for absolute-time updates it still propagates the clamped departure delay instead of the outgoing trip's own delay, so the order-independence fix (`1075419`) must be kept until upstream has an equivalent. When rebasing, drop only the parts upstream already has and keep `rt.block_terminal*` passing.
+- Deployed to production 2026-11-01 (image `ghcr.io/piotrski/motis:e24340a5`, Coolify deployment `ks4ccgwwsg4kck4oocggco00`).
 - Source: `piotrski/nigiri@fix/gtfsrt-block-terminal-departure` (on top of the adjacent service-day patch; `.pkg` pins `branch=fix/gtfsrt-adjacent-service-day`, which is fast-forwarded to the pinned commit)
 - Purpose: trips of a GTFS block share the terminal stop; an incoming trip's arrival delay must not overwrite the next trip's departure there (Kraków line 70 at Pleszów showed 21:34 for a 21:39 departure). A late arrival still holds the departure, but only the outgoing trip's own delay propagates along that trip, independent of the order of the trips' updates. A later update that starts after a trip's first stop keeps that stop's existing prediction (backport of the #419 `pred` initialisation).
 - Tests to run:
