@@ -63,6 +63,17 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
   - `motis-test --gtest_filter='passed_stops.*:motis_rt_update.passed_stops*'`
   - full `motis-test`
 
+### Live vehicle stream
+
+- Status: fork-only (experimental endpoint)
+- Source: `feat/live-vehicle-stream`, `feat/live-vehicle-stream-prod`; details in [`vehicle-stream.md`](vehicle-stream.md)
+- Purpose: push live vehicle positions over a WebSocket (`/api/experimental/vehicle-stream`) instead of clients polling `map/vehicles`
+- `net` is pinned to `piotrski/net@feat/ws-strand-and-message-limit`: `send` is posted onto the session strand, and `web_server::set_ws_read_message_max` bounds inbound WebSocket messages (MOTIS sets 4 KiB). Return to upstream `net` once both are merged there.
+- Per-endpoint GTFS-RT `update_interval`: lets one city's feeds poll faster than the global `timetable.update_interval`. The RT loop runs at the fastest interval and replays the last good snapshot of endpoints that are not due. Upstream MOTIS has no equivalent.
+- Tests to run:
+  - `motis-test --gtest_filter='motis_vehicle_stream.*'`
+  - `motis-test --gtest_filter='motis.config*:motis_rt_update.*'`
+
 ## Resolved Upstream
 
 ### Modes on `Place`
