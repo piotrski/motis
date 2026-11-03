@@ -1,5 +1,6 @@
 #include "motis/config.h"
 
+#include <algorithm>
 #include <iostream>
 
 #include "boost/url.hpp"
@@ -189,6 +190,15 @@ void config::verify() const {
               rt.protocol_ != timetable::dataset::rt::protocol::gtfsrt ||
                   rt.last_good_ttl_ > 0U,
               "GTFS-RT last_good_ttl must be greater than zero");
+          if (rt.update_interval_.has_value()) {
+            utl::verify(
+                rt.protocol_ == timetable::dataset::rt::protocol::gtfsrt,
+                "rt update_interval is only supported for GTFS-RT endpoints");
+            utl::verify(*rt.update_interval_ > 0U,
+                        "rt update_interval must be greater than zero");
+            utl::verify(*rt.update_interval_ < rt.last_good_ttl_,
+                        "rt update_interval must be less than last_good_ttl");
+          }
           try {
             boost::urls::url{rt.url_};
           } catch (std::exception const& e) {
@@ -381,6 +391,21 @@ bool config::use_street_routing() const {
           [](bool const b) { return b; },
       },
       street_routing_);
+}
+
+unsigned config::timetable::rt_loop_interval() const {
+  auto interval = update_interval_;
+  for (auto const& [_, d] : datasets_) {
+    if (!d.rt_.has_value()) {
+      continue;
+    }
+    for (auto const& rt : *d.rt_) {
+      if (rt.update_interval_.has_value()) {
+        interval = std::min(interval, *rt.update_interval_);
+      }
+    }
+  }
+  return interval;
 }
 
 config::timetable::vehicle_eta::mode config::vehicle_eta_mode(

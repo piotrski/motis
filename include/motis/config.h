@@ -82,6 +82,11 @@ struct config {
         std::optional<headers_t> headers_{};
         unsigned last_good_ttl_{180U};
 
+        // Poll interval in seconds for this GTFS-RT endpoint. Unset: the
+        // global timetable update_interval. Not part of hash() so feed ids
+        // stay stable when the interval changes.
+        std::optional<unsigned> update_interval_{};
+
         enum struct protocol { gtfsrt, auser, siri, siri_json };
         protocol protocol_{protocol::gtfsrt};
       };
@@ -190,6 +195,10 @@ struct config {
     std::optional<std::filesystem::path> assistance_times_{};
     std::optional<route_shapes> route_shapes_{};
     std::optional<vehicle_eta> vehicle_eta_{};
+
+    // Period of the RT loop: the smallest of update_interval and every
+    // per-endpoint update_interval.
+    unsigned rt_loop_interval() const;
   };
   std::optional<timetable> timetable_{};
 

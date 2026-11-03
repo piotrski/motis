@@ -72,10 +72,15 @@ hub::hub(asio::io_context& ioc, source src, settings s)
 std::shared_ptr<hub> hub::create(asio::io_context& ioc,
                                  data& d,
                                  config const& c) {
+  // Cycles are published at the RT loop period (the fastest per-endpoint
+  // update_interval). Vehicles must outlive the slowest feed's interval, so
+  // max age stays tied to the global update_interval.
   auto const update_interval =
       c.timetable_.has_value() ? c.timetable_->update_interval_ : 60U;
+  auto const loop_interval =
+      c.timetable_.has_value() ? c.timetable_->rt_loop_interval() : 60U;
   auto s = settings{};
-  s.limits_.update_interval_ = update_interval;
+  s.limits_.update_interval_ = loop_interval;
   s.limits_.default_max_age_ =
       vehicle_matching::default_max_age(update_interval);
 

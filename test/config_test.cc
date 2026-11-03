@@ -433,3 +433,88 @@ street_routing: {}
 )"s));
   }
 }
+
+TEST(motis, config_rt_update_interval) {
+  auto const c = config::read(R"(
+timetable:
+  update_interval: 60
+  datasets:
+    fast:
+      path: fast.gtfs.zip
+      rt:
+        - url: https://example.test/fast_positions
+          update_interval: 10
+        - url: https://example.test/fast_trip_updates
+    slow:
+      path: slow.gtfs.zip
+      rt:
+        - url: https://example.test/slow_trip_updates
+)"s);
+  auto const& datasets = c.timetable_->datasets_;
+  EXPECT_EQ(std::optional{10U}, datasets.at("fast").rt_->at(0).update_interval_);
+  EXPECT_FALSE(datasets.at("fast").rt_->at(1).update_interval_.has_value());
+  EXPECT_FALSE(datasets.at("slow").rt_->at(0).update_interval_.has_value());
+  EXPECT_EQ(10U, c.timetable_->rt_loop_interval());
+
+  // The interval is not part of the endpoint hash, so feed ids stay stable.
+  auto without = datasets.at("fast").rt_->at(0);
+  without.update_interval_ = std::nullopt;
+  EXPECT_EQ(without.hash(), datasets.at("fast").rt_->at(0).hash());
+
+  EXPECT_EQ(60U, config::read(R"(
+timetable:
+  update_interval: 60
+  datasets:
+    slow:
+      path: slow.gtfs.zip
+      rt:
+        - url: https://example.test/slow_trip_updates
+)"s)
+                     .timetable_->rt_loop_interval());
+
+  // A per-endpoint interval longer than the global one leaves the loop at
+  // the global interval.
+  EXPECT_EQ(30U, config::read(R"(
+timetable:
+  update_interval: 30
+  datasets:
+    slow:
+      path: slow.gtfs.zip
+      rt:
+        - url: https://example.test/slow_trip_updates
+          update_interval: 120
+          last_good_ttl: 300
+)"s)
+                     .timetable_->rt_loop_interval());
+
+  EXPECT_ANY_THROW(config::read(R"(
+timetable:
+  datasets:
+    test:
+      path: test.gtfs.zip
+      rt:
+        - url: https://example.test/trip_updates
+          update_interval: 0
+)"s));
+  EXPECT_ANY_THROW(config::read(R"(
+timetable:
+  datasets:
+    test:
+      path: test.gtfs.zip
+      rt:
+        - url: https://example.test/trip_updates
+          update_interval: 180
+          last_good_ttl: 180
+)"s));
+  EXPECT_ANY_THROW(config::read(R"(
+timetable:
+  incremental_rt_update: true
+  datasets:
+    test:
+      path: test.gtfs.zip
+      rt:
+        - url: https://example.test/siri
+          protocol: siri
+          update_interval: 10
+)"s));
+}

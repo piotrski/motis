@@ -144,6 +144,9 @@ struct gtfs_rt_endpoint {
     std::int64_t reference_at_seconds_{};
     bool failed_{false};
     bool expired_{false};
+    // Earliest loop start at which this endpoint is fetched again. Endpoints
+    // with their own update_interval skip the loop ticks in between.
+    std::chrono::steady_clock::time_point next_fetch_at_{};
   };
 
   config::timetable::dataset::rt ep_;
@@ -914,6 +917,7 @@ void run_rt_update(boost::asio::io_context& ioc,
         }
         constexpr auto kWorkloads =
             std::array{"endpoints",
+                       "fetched_endpoints",
                        "fetched_bytes",
                        "vehicles",
                        "history_observations",
@@ -1047,6 +1051,10 @@ void run_rt_update(boost::asio::io_context& ioc,
         auto effective_prediction_selection_state =
             effective_vehicle_prediction_selection_state{};
 
+        // The loop runs at the fastest configured interval. Endpoints with a
+        // longer interval are skipped on the ticks in between.
+        auto const rt_loop_interval = c.timetable_->rt_loop_interval();
+
         while (true) {
           // Remember when we started, so we can schedule the next update.
           auto const start = std::chrono::steady_clock::now();
@@ -1149,6 +1157,7 @@ void run_rt_update(boost::asio::io_context& ioc,
             struct collected_update {
               std::optional<std::string> body_{};
               std::exception_ptr error_{};
+              bool skipped_{false};
             };
             struct prepared_gtfsrt_update {
               std::size_t endpoint_idx_;
@@ -1255,6 +1264,25 @@ void run_rt_update(boost::asio::io_context& ioc,
                                               ? gtfsrt_source_state::expired
                                               : gtfsrt_source_state::no_base,
                                           age, false);
+              return prepared_gtfsrt_update{endpoint_idx, std::nullopt, false,
+                                            false};
+            };
+            // An endpoint whose own update_interval has not elapsed is not
+            // fetched. The rtt is rebuilt every loop tick, so its last good
+            // snapshot is replayed. source_success_ stays false: the replay
+            // neither re-ingests vehicle positions nor counts as a fresh
+            // successful update.
+            auto const prepare_not_due = [&](std::size_t const endpoint_idx,
+                                             gtfs_rt_endpoint const& g) {
+              expire_cache(g, std::chrono::steady_clock::now());
+              if (g.last_good_->has_snapshot_) {
+                return prepared_gtfsrt_update{
+                    .endpoint_idx_ = endpoint_idx,
+                    .msg_ = g.last_good_->snapshot_,
+                    .source_success_ = false,
+                    .provider_observed_at_seconds_ =
+                        g.last_good_->reference_at_seconds_};
+              }
               return prepared_gtfsrt_update{endpoint_idx, std::nullopt, false,
                                             false};
             };
@@ -1506,9 +1534,28 @@ void run_rt_update(boost::asio::io_context& ioc,
                 collected.push_back({.body_ = utl::read_file(path.c_str())});
               }
             } else if (!endpoints.empty()) {
+              // GTFS-RT endpoints with their own update_interval are fetched
+              // only when it has elapsed. Everything else is fetched on every
+              // loop tick.
+              collected.resize(endpoints.size());
+              auto due = std::vector<std::size_t>{};
+              for (auto i = std::size_t{0U}; i != endpoints.size(); ++i) {
+                auto const* g = std::get_if<gtfs_rt_endpoint>(&endpoints[i]);
+                if (g == nullptr || start >= g->last_good_->next_fetch_at_) {
+                  due.push_back(i);
+                  if (g != nullptr) {
+                    g->last_good_->next_fetch_at_ =
+                        start + std::chrono::seconds{g->ep_.update_interval_.value_or(
+                                    c.timetable_->update_interval_)};
+                  }
+                } else {
+                  collected[i].skipped_ = true;
+                }
+              }
               auto awaitables = utl::to_vec(
-                  endpoints,
-                  [&](std::variant<gtfs_rt_endpoint, auser_endpoint> const& x) {
+                  due,
+                  [&](std::size_t const due_idx) {
+                    auto const& x = endpoints[due_idx];
                     return boost::asio::co_spawn(
                         executor,
                         [&, endpoint = &x]() -> awaitable<std::string> {
@@ -1567,18 +1614,27 @@ void run_rt_update(boost::asio::io_context& ioc,
                         asio::deferred);
                   });
 
-              auto [_, exceptions, bodies] =
-                  co_await asio::experimental::make_parallel_group(awaitables)
-                      .async_wait(asio::experimental::wait_for_all(),
-                                  asio::use_awaitable);
-              for (auto&& [ex, body] : utl::zip(exceptions, bodies)) {
-                if (ex) {
-                  collected.push_back({std::nullopt, ex});
-                } else {
-                  collected.push_back({std::move(body), {}});
+              if (!awaitables.empty()) {
+                auto [_, exceptions, bodies] =
+                    co_await asio::experimental::make_parallel_group(awaitables)
+                        .async_wait(asio::experimental::wait_for_all(),
+                                    asio::use_awaitable);
+                for (auto&& [due_idx, ex, body] :
+                     utl::zip(due, exceptions, bodies)) {
+                  if (ex) {
+                    collected[due_idx] = {std::nullopt, ex};
+                  } else {
+                    collected[due_idx] = {std::move(body), {}};
+                  }
                 }
               }
             }
+            set_workload("fetched_endpoints",
+                         static_cast<std::size_t>(std::count_if(
+                             begin(collected), end(collected),
+                             [](collected_update const& u) {
+                               return !u.skipped_;
+                             })));
             set_phase("feed_wait", feed_wait_started);
             set_workload("fetched_bytes",
                          std::accumulate(
@@ -1616,6 +1672,11 @@ void run_rt_update(boost::asio::io_context& ioc,
               utl::visit(
                   ep,
                   [&](gtfs_rt_endpoint const& g) {
+                    if (fetched.skipped_) {
+                      add_to_group(endpoint_idx,
+                                   prepare_not_due(endpoint_idx, g));
+                      return;
+                    }
                     try {
                       if (fetched.error_) {
                         std::rethrow_exception(fetched.error_);
@@ -2340,15 +2401,13 @@ void run_rt_update(boost::asio::io_context& ioc,
           }
           cycle_duration.Set(
               std::chrono::duration<double>{cycle_elapsed}.count());
-          if (cycle_elapsed >
-              std::chrono::seconds{c.timetable_->update_interval_}) {
+          if (cycle_elapsed > std::chrono::seconds{rt_loop_interval}) {
             cycle_overrun.Increment();
           }
           cycle_completed.Increment();
 
           // Schedule next update.
-          timer.expires_at(
-              start + std::chrono::seconds{c.timetable_->update_interval_});
+          timer.expires_at(start + std::chrono::seconds{rt_loop_interval});
           co_await timer.async_wait(
               asio::redirect_error(asio::use_awaitable, ec));
           if (ec == asio::error::operation_aborted) {

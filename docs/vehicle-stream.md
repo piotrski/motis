@@ -39,7 +39,34 @@ to drop vehicles that went stale.
     computed against what the connection actually received.
   - **Limits:** caps connections, pending inbound messages, message size and languages per cycle.
   - **Stats:** `GET /api/experimental/vehicle-stream/stats`.
-- `rt_update.cc` is untouched. The wiring is about 20 lines in `server.cc` and `motis_instance.h`.
+- The wiring is about 20 lines in `server.cc` and `motis_instance.h`. `rt_update.cc` only gains the per-endpoint
+  `update_interval` (below).
+
+## Per-endpoint `update_interval`
+
+A GTFS-RT entry under `timetable.datasets.<id>.rt` can set its own poll interval in seconds:
+
+```yaml
+timetable:
+  update_interval: 60
+  datasets:
+    pl-ZTP-Kraków-A:
+      rt:
+        - url: https://…/VehiclePositions_A.pb
+          update_interval: 10
+```
+
+- The RT loop runs at the smallest interval configured (`timetable::rt_loop_interval()`). An endpoint is fetched when
+  its own interval (or the global one) has elapsed since its last fetch, and skipped on the ticks in between.
+- Every tick still rebuilds the realtime timetable from all GTFS-RT endpoints. A skipped endpoint replays its last
+  good snapshot. The replay does not re-ingest vehicle positions and does not count as a successful update in metrics.
+- VDV AUS and SIRI endpoints are polled on every tick. `update_interval` on them is rejected, as are `0` and values
+  `>= last_good_ttl`.
+- The stream's `updateInterval` is the loop period. Vehicle max age, position retention and calibration stay tied to
+  the global `update_interval`, so vehicles from slow feeds do not expire between their fetches.
+- Cost: each tick rebuilds the whole rtt. With 60 s globally and 10 s for one city, the rebuild CPU is six times
+  higher than before. Watch `motis_rt_cycle_duration_seconds` and `motis_rt_cycle_overrun_total` after enabling it.
+- `motis_rt_cycle_workload{kind="fetched_endpoints"}` shows how many endpoints were fetched in the last tick.
 
 ## `net` fork
 

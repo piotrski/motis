@@ -1658,4 +1658,74 @@ TEST(motis_rt_update, counts_entities_and_resolve_errors_per_endpoint) {
   EXPECT_EQ(metrics.find("secret"), std::string::npos);
 }
 
+TEST(motis_rt_update, endpoint_update_interval_polls_fast_feed_and_replays_slow) {
+  auto const test_dir = fs::absolute("test/data/rt-endpoint-update-interval");
+  auto ec = std::error_code{};
+  fs::remove_all(test_dir, ec);
+  fs::create_directories(test_dir);
+  auto cwd = cwd_guard{test_dir};
+  auto const today =
+      std::chrono::floor<date::days>(std::chrono::system_clock::now());
+  auto const service_date = date::format("%Y%m%d", today);
+  auto const first_day = date::format("%F", today);
+  auto const gtfs = std::vformat(kGtfs, std::make_format_args(service_date));
+
+  auto slow_feed = to_feed_msg(
+      {trip_update{.trip_ = {.trip_id_ = "trip-1",
+                             .start_time_ = "10:00:00",
+                             .date_ = service_date},
+                   .stop_updates_ = {{.stop_id_ = "stop-1",
+                                      .seq_ = 1U,
+                                      .ev_type_ = nigiri::event_type::kDep,
+                                      .delay_minutes_ = 10}}}},
+      today + 9h);
+  slow_feed.mutable_header()->clear_timestamp();
+  auto fast_feed = to_feed_msg(
+      {trip_update{.trip_ = {.trip_id_ = "trip-2",
+                             .start_time_ = "11:00:00",
+                             .date_ = service_date},
+                   .stop_updates_ = {{.stop_id_ = "stop-1",
+                                      .seq_ = 1U,
+                                      .ev_type_ = nigiri::event_type::kDep,
+                                      .delay_minutes_ = 5}}}},
+      today + 9h);
+  fast_feed.mutable_header()->clear_timestamp();
+
+  // More bodies than expected requests, so an extra fetch is counted instead
+  // of hanging on a closed server.
+  auto slow = response_server{
+      std::vector<std::string>(3U, slow_feed.SerializeAsString()), 0ms};
+  auto fast = response_server{
+      std::vector<std::string>(6U, fast_feed.SerializeAsString()), 0ms};
+  auto const c = config{
+      .timetable_ = {config::timetable{
+          .first_day_ = first_day,
+          .num_days_ = 2,
+          .update_interval_ = 5,
+          .datasets_ = {{"test",
+                         {.path_ = gtfs,
+                          .rt_ = {{{.url_ = slow.url()},
+                                   {.url_ = fast.url(),
+                                    .update_interval_ = 1U}}}}}}}}};
+  ASSERT_EQ(1U, c.timetable_->rt_loop_interval());
+  import(c, "data");
+  auto d = data{"data", c};
+
+  auto ioc = boost::asio::io_context{};
+  run_rt_update(ioc, c, d);
+  ioc.run_for(2500ms);
+  ioc.stop();
+
+  // Ticks at about 0 s, 1 s and 2 s: the fast endpoint is fetched on each,
+  // the slow one (global 5 s) only on the first.
+  EXPECT_GE(fast.requests(), 2U);
+  EXPECT_EQ(1U, slow.requests());
+
+  // The rtt is rebuilt on every tick. The slow feed's delay survives the
+  // ticks on which it was not fetched because its snapshot is replayed.
+  auto const response = query_stop_times(d);
+  ASSERT_EQ(response.stopTimes_.size(), 1U);
+  EXPECT_TRUE(response.stopTimes_.front().realTime_);
+}
+
 }  // namespace
