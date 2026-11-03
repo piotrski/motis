@@ -1,9 +1,235 @@
+#include <array>
+#include <string_view>
+#include <utility>
+
+#include "fmt/format.h"
+
 #include "gtest/gtest.h"
 
 #include "motis/config.h"
 
 using namespace motis;
 using namespace std::string_literals;
+using namespace std::string_view_literals;
+
+TEST(motis, vehicle_eta_defaults_to_off_without_history_work) {
+  auto const c = config::read(R"(
+timetable:
+  datasets:
+    A:
+      path: a.gtfs.zip
+)"s);
+
+  ASSERT_TRUE(c.timetable_.has_value());
+  EXPECT_FALSE(c.timetable_->vehicle_eta_.has_value());
+  EXPECT_EQ(config::timetable::vehicle_eta::mode::off,
+            c.vehicle_eta_mode("any-feed", nigiri::clasz::kBus));
+  EXPECT_FALSE(c.vehicle_eta_enabled());
+}
+
+TEST(motis, vehicle_eta_parses_modes_history_and_overrides) {
+  auto const c = config::read(R"(
+timetable:
+  datasets:
+    A:
+      path: a.gtfs.zip
+    B:
+      path: b.gtfs.zip
+  vehicle_eta:
+    mode: shadow
+    history:
+      max_age_seconds: 300
+      retention_seconds: 900
+      max_observation_gap_seconds: 120
+      max_observations_per_vehicle: 20
+    selection:
+      min_gps_confidence: 0.5
+      min_selected_gps_confidence: 0.35
+      provider_timestamp_tolerance_seconds: 120
+    modes:
+      BUS: effective
+    feeds:
+      A:
+        modes: [BUS]
+        mode: off
+)"s);
+
+  ASSERT_TRUE(c.timetable_->vehicle_eta_.has_value());
+  EXPECT_EQ(300, c.timetable_->vehicle_eta_->history_.max_age_seconds_);
+  EXPECT_EQ(900, c.timetable_->vehicle_eta_->history_.retention_seconds_);
+  EXPECT_EQ(120,
+            c.timetable_->vehicle_eta_->history_.max_observation_gap_seconds_);
+  EXPECT_DOUBLE_EQ(0.5,
+                   c.timetable_->vehicle_eta_->selection_.min_gps_confidence_);
+  EXPECT_DOUBLE_EQ(
+      0.35,
+      c.timetable_->vehicle_eta_->selection_.min_selected_gps_confidence_);
+  EXPECT_EQ(120, c.timetable_->vehicle_eta_->selection_
+                     .provider_timestamp_tolerance_seconds_);
+  EXPECT_EQ(0, c.timetable_->vehicle_eta_->selection_
+                   .early_departure_tolerance_seconds_);
+  EXPECT_EQ(20U,
+            c.timetable_->vehicle_eta_->history_.max_observations_per_vehicle_);
+  EXPECT_TRUE(c.vehicle_eta_enabled());
+  EXPECT_EQ(config::timetable::vehicle_eta::mode::off,
+            c.vehicle_eta_mode("A", nigiri::clasz::kBus));
+  EXPECT_EQ(config::timetable::vehicle_eta::mode::shadow,
+            c.vehicle_eta_mode("A", nigiri::clasz::kTram));
+  EXPECT_EQ(config::timetable::vehicle_eta::mode::effective,
+            c.vehicle_eta_mode("B", nigiri::clasz::kBus));
+  EXPECT_EQ(config::timetable::vehicle_eta::mode::shadow,
+            c.vehicle_eta_mode("B", nigiri::clasz::kTram));
+}
+
+TEST(motis, vehicle_eta_accepts_canonical_transit_modes_and_aliases) {
+  using nigiri::clasz;
+
+  constexpr auto modes = std::array{
+      std::pair{"AIRPLANE"sv, clasz::kAir},
+      std::pair{"AIR"sv, clasz::kAir},
+      std::pair{"HIGHSPEED_RAIL"sv, clasz::kHighSpeed},
+      std::pair{"HIGHSPEED"sv, clasz::kHighSpeed},
+      std::pair{"LONG_DISTANCE"sv, clasz::kLongDistance},
+      std::pair{"LONGDISTANCE"sv, clasz::kLongDistance},
+      std::pair{"COACH"sv, clasz::kCoach},
+      std::pair{"NIGHT_RAIL"sv, clasz::kNight},
+      std::pair{"NIGHT"sv, clasz::kNight},
+      std::pair{"RIDE_SHARING"sv, clasz::kRideSharing},
+      std::pair{"REGIONAL_FAST_RAIL"sv, clasz::kRegional},
+      std::pair{"REGIONAL_RAIL"sv, clasz::kRegional},
+      std::pair{"REGIONALFAST"sv, clasz::kRegional},
+      std::pair{"REGIONAL"sv, clasz::kRegional},
+      std::pair{"SUBURBAN"sv, clasz::kSuburban},
+      std::pair{"METRO"sv, clasz::kSuburban},
+      std::pair{"SUBWAY"sv, clasz::kSubway},
+      std::pair{"TRAM"sv, clasz::kTram},
+      std::pair{"BUS"sv, clasz::kBus},
+      std::pair{"FERRY"sv, clasz::kShip},
+      std::pair{"SHIP"sv, clasz::kShip},
+      std::pair{"ODM"sv, clasz::kODM},
+      std::pair{"FUNICULAR"sv, clasz::kFunicular},
+      std::pair{"CABLE_CAR"sv, clasz::kFunicular},
+      std::pair{"AERIAL_LIFT"sv, clasz::kAerialLift},
+      std::pair{"AREAL_LIFT"sv, clasz::kAerialLift},
+      std::pair{"OTHER"sv, clasz::kOther},
+  };
+
+  for (auto const& [configured_mode, query_clasz] : modes) {
+    auto const c = config::read(fmt::format(R"(
+timetable:
+  datasets:
+    A:
+      path: a.gtfs.zip
+  vehicle_eta:
+    modes:
+      {}: effective
+)",
+                                            configured_mode));
+    EXPECT_EQ(config::timetable::vehicle_eta::mode::effective,
+              c.vehicle_eta_mode("A", query_clasz))
+        << configured_mode;
+  }
+}
+
+TEST(motis, vehicle_eta_feed_selectors_normalize_aliases) {
+  auto const c = config::read(R"(
+timetable:
+  datasets:
+    A:
+      path: a.gtfs.zip
+  vehicle_eta:
+    feeds:
+      A:
+        modes: [SHIP]
+        mode: effective
+)"s);
+
+  EXPECT_TRUE(c.vehicle_eta_enabled());
+  EXPECT_EQ(config::timetable::vehicle_eta::mode::effective,
+            c.vehicle_eta_mode("A", nigiri::clasz::kShip));
+  EXPECT_EQ(config::timetable::vehicle_eta::mode::off,
+            c.vehicle_eta_mode("A", nigiri::clasz::kBus));
+}
+
+TEST(motis, vehicle_eta_off_policies_do_not_enable_work) {
+  auto const c = config::read(R"(
+timetable:
+  datasets:
+    A:
+      path: a.gtfs.zip
+    B:
+      path: b.gtfs.zip
+  vehicle_eta:
+    mode: effective
+    modes:
+      BUS: shadow
+    feeds:
+      A:
+        mode: off
+      B:
+        mode: off
+)"s);
+
+  EXPECT_FALSE(c.vehicle_eta_enabled());
+  EXPECT_EQ(config::timetable::vehicle_eta::mode::off,
+            c.vehicle_eta_mode("A", nigiri::clasz::kBus));
+  EXPECT_EQ(config::timetable::vehicle_eta::mode::off,
+            c.vehicle_eta_mode("B", nigiri::clasz::kTram));
+}
+
+TEST(motis, vehicle_eta_rejects_invalid_configuration) {
+  auto const config_with = [](std::string_view const vehicle_eta) {
+    return fmt::format(R"(
+timetable:
+  datasets:
+    A:
+      path: a.gtfs.zip
+  vehicle_eta:
+{}
+)",
+                       vehicle_eta);
+  };
+
+  EXPECT_ANY_THROW(config::read(config_with("    mode: invalid")));
+  EXPECT_ANY_THROW(config::read(config_with(R"(    feeds:
+      missing:
+        mode: shadow)")));
+  EXPECT_ANY_THROW(config::read(config_with(R"(    modes:
+      INVALID: shadow)")));
+  EXPECT_ANY_THROW(config::read(config_with(R"(    feeds:
+      A:
+        modes: [INVALID]
+        mode: shadow)")));
+  EXPECT_ANY_THROW(config::read(config_with(R"(    feeds:
+      A:
+        modes: []
+        mode: shadow)")));
+  EXPECT_ANY_THROW(config::read(config_with(R"(    modes:
+      AIR: shadow
+      AIRPLANE: effective)")));
+  EXPECT_ANY_THROW(config::read(config_with(R"(    feeds:
+      A:
+        modes: [SHIP, FERRY]
+        mode: shadow)")));
+  EXPECT_ANY_THROW(
+      config::read(config_with("    history:\n      max_age_seconds: -1")));
+  EXPECT_ANY_THROW(
+      config::read(config_with("    history:\n      max_age_seconds: 0")));
+  EXPECT_ANY_THROW(
+      config::read(config_with("    history:\n      retention_seconds: 0")));
+  EXPECT_ANY_THROW(config::read(config_with(R"(    history:
+      max_age_seconds: 300
+      retention_seconds: 299)")));
+  EXPECT_ANY_THROW(config::read(
+      config_with("    history:\n      max_observations_per_vehicle: 0")));
+  EXPECT_ANY_THROW(config::read(
+      config_with("    history:\n      max_observation_gap_seconds: 0")));
+  EXPECT_ANY_THROW(config::read(config_with(R"(    selection:
+      min_gps_confidence: 0.5
+      min_selected_gps_confidence: 0.6)")));
+  EXPECT_ANY_THROW(config::read(config_with(R"(    selection:
+      provider_timestamp_tolerance_seconds: -1)")));
+}
 
 TEST(motis, config) {
   auto const c = config{
@@ -72,6 +298,7 @@ timetable:
         - url: https://stc.traines.eu/mirror/german-delfi-gtfs-rt/latest.gtfs-rt.pbf
           headers:
             Authorization: test
+          last_good_ttl: 180
           protocol: gtfsrt
     nl:
       path: nl.gtfs.zip
@@ -80,8 +307,10 @@ timetable:
       extend_calendar: false
       rt:
         - url: https://gtfs.ovapi.nl/nl/trainUpdates.pb
+          last_good_ttl: 180
           protocol: gtfsrt
         - url: https://gtfs.ovapi.nl/nl/tripUpdates.pb
+          last_good_ttl: 180
           protocol: gtfsrt
   assistance_times: assistance.csv
 elevators: false
@@ -143,6 +372,17 @@ geocoding: true
 )"s));
 
   EXPECT_TRUE(c.use_street_routing());
+
+  EXPECT_ANY_THROW(config::read(R"(
+timetable:
+  datasets:
+    test:
+      path: test.gtfs.zip
+      rt:
+        - url: https://example.test/trip_updates
+          last_good_ttl: 0
+          protocol: gtfsrt
+)"s));
 
   // Using street_routing struct
   {

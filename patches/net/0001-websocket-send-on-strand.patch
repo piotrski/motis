@@ -1,0 +1,23 @@
+diff --git a/src/web_server/websocket_session.cc b/src/web_server/websocket_session.cc
+index 99c9289..ee7853e 100644
+--- a/src/web_server/websocket_session.cc
++++ b/src/web_server/websocket_session.cc
+@@ -49,9 +49,16 @@ struct websocket_session : public ws_session {
+     on_msg_ = std::move(fn);
+   }
+ 
++  // Callable from any thread: the queue and the stream are only touched on
++  // the stream's executor (the session's strand).
+   void send(std::string msg, ws_msg_type type, send_cb_t cb) override {
+-    send_queue_.emplace(std::move(msg), type, cb);
+-    send_next();
++    boost::asio::post(
++        derived().ws().get_executor(),
++        [this, self = derived().shared_from_this(), msg = std::move(msg), type,
++         cb = std::move(cb)]() mutable {
++          send_queue_.emplace(std::move(msg), type, std::move(cb));
++          send_next();
++        });
+   }
+ 
+ private:
