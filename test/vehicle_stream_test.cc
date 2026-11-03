@@ -2,17 +2,25 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include "boost/asio/connect.hpp"
 #include "boost/asio/io_context.hpp"
+#include "boost/asio/ip/tcp.hpp"
+#include "boost/beast/core/flat_buffer.hpp"
+#include "boost/beast/websocket.hpp"
 #include "boost/iostreams/copy.hpp"
 #include "boost/iostreams/device/array.hpp"
 #include "boost/iostreams/device/back_inserter.hpp"
 #include "boost/iostreams/filter/gzip.hpp"
 #include "boost/iostreams/filtering_streambuf.hpp"
 #include "boost/json.hpp"
+
+#include "net/web_server/web_server.h"
 
 #include "motis/rt/vehicle_position.h"
 #include "motis/vehicle_stream/hub.h"
@@ -566,4 +574,57 @@ TEST(motis_vehicle_stream, hub_caps_languages_when_a_deferred_update_builds_its_
   ASSERT_EQ(1U, polish->pending());
   EXPECT_EQ("error", f.last(*polish).at("type").as_string());
   EXPECT_EQ(2, f.builds_);
+}
+
+TEST(motis_vehicle_stream, web_server_refuses_oversized_client_messages) {
+  namespace asio = boost::asio;
+  namespace ws = boost::beast::websocket;
+  using tcp = asio::ip::tcp;
+
+  // Pick a free port.
+  auto port = std::string{};
+  {
+    auto probe_ioc = asio::io_context{};
+    auto probe = tcp::acceptor{probe_ioc, {asio::ip::make_address("127.0.0.1"), 0}};
+    port = std::to_string(probe.local_endpoint().port());
+  }
+
+  auto server_ioc = asio::io_context{};
+  auto server = net::web_server{server_ioc};
+  server.set_ws_read_message_max(kMaxClientMessageSize);
+  auto received = std::vector<std::size_t>{};
+  auto mutex = std::mutex{};
+  server.on_ws_msg([&](net::ws_session_ptr, std::string const& msg,
+                       net::ws_msg_type) {
+    auto const lock = std::scoped_lock{mutex};
+    received.push_back(msg.size());
+  });
+  auto ec = boost::system::error_code{};
+  server.init("127.0.0.1", port, ec);
+  ASSERT_FALSE(ec) << ec.message();
+  server.run();
+  auto server_thread = std::thread{[&]() { server_ioc.run(); }};
+
+  auto client_ioc = asio::io_context{};
+  auto client = ws::stream<tcp::socket>{client_ioc};
+  asio::connect(client.next_layer(),
+                tcp::resolver{client_ioc}.resolve("127.0.0.1", port));
+  client.handshake("127.0.0.1", std::string{kPath});
+
+  client.write(asio::buffer(std::string(kMaxClientMessageSize, 'a')));
+  client.write(asio::buffer(std::string(kMaxClientMessageSize + 1U, 'b')));
+
+  // The server fails the read with message_too_big and closes with 1009.
+  auto buffer = boost::beast::flat_buffer{};
+  auto read_ec = boost::system::error_code{};
+  client.read(buffer, read_ec);
+  EXPECT_EQ(ws::error::closed, read_ec);
+  EXPECT_EQ(ws::close_code::too_big, client.reason().code);
+
+  server.stop();
+  server_ioc.stop();
+  server_thread.join();
+
+  auto const lock = std::scoped_lock{mutex};
+  EXPECT_EQ((std::vector<std::size_t>{kMaxClientMessageSize}), received);
 }

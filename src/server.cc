@@ -21,6 +21,7 @@
 #include "motis/ctx_exec.h"
 #include "motis/data.h"
 #include "motis/motis_instance.h"
+#include "motis/vehicle_stream/hub.h"
 
 namespace fs = std::filesystem;
 
@@ -41,6 +42,7 @@ int server(data d, config const& c, std::string_view const motis_version) {
 
   auto s = net::web_server{scheduler.runner_.ios()};
   s.set_timeout(std::chrono::minutes{5});
+  s.set_ws_read_message_max(vehicle_stream::kMaxClientMessageSize);
   s.on_http_request(m.qr_);
   s.on_upgrade_ok([&](net::web_server::http_req_t const& req) {
     auto const target = req.target();

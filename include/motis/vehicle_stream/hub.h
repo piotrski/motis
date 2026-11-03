@@ -27,6 +27,10 @@ namespace motis::vehicle_stream {
 
 constexpr auto kPath = std::string_view{"/api/experimental/vehicle-stream"};
 
+// Largest client message. The web server refuses bigger WebSocket messages
+// before buffering them (close 1009); the hub checks again for safety.
+constexpr auto kMaxClientMessageSize = std::size_t{4096U};
+
 struct source {
   // The realtime snapshot currently published. A new owner means a new cycle.
   std::function<std::shared_ptr<void const>()> current_;
@@ -41,7 +45,7 @@ struct settings {
   std::chrono::milliseconds poll_interval_{250};
   std::chrono::seconds heartbeat_interval_{25};
   std::size_t max_connections_{1000U};
-  std::size_t max_message_size_{4096U};
+  std::size_t max_message_size_{kMaxClientMessageSize};
   // Messages received but not handled yet, over all connections.
   std::size_t max_pending_messages_{1024U};
   // Distinct languages serialized per cycle.

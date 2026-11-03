@@ -41,12 +41,16 @@ to drop vehicles that went stale.
   - **Stats:** `GET /api/experimental/vehicle-stream/stats`.
 - `rt_update.cc` is untouched. The wiring is about 20 lines in `server.cc` and `motis_instance.h`.
 
-## Requires a `net` fix
+## `net` fork
 
-`net::ws_session::send` touches the Beast stream on the caller's thread, but `net` runs each socket on its own
-strand, so sends from another thread race the socket's reads (pings, pongs, close). The prototype build applies
-`patches/net/0001-websocket-send-on-strand.patch` to `deps/net`, which posts `send` onto the socket's executor.
-To ship it, upstream that to motis-project/net (or point `.pkg` at a fork) and drop the patch.
+The stream needs two changes in `net`, carried on
+[piotrski/net `feat/ws-strand-and-message-limit`](https://github.com/piotrski/net/tree/feat/ws-strand-and-message-limit)
+and pinned in `.pkg`:
 
-Also needed in `net` before production: a `read_message_max` on the WebSocket stream (Beast defaults to 16 MiB), so
-oversized client messages are refused before they are buffered. The hub only rejects them after the fact.
+- `net::ws_session::send` posts onto the socket's strand. Before, it touched the Beast stream on the caller's thread
+  while `net` runs each socket on its own strand, so sends from the hub raced the socket's reads (pings, pongs, close).
+- `web_server::set_ws_read_message_max`. `server.cc` sets it to `vehicle_stream::kMaxClientMessageSize` (4 KiB), so
+  an oversized client message fails the read and the socket closes with code 1009 before the message is buffered.
+  Beast's default is 16 MiB. The hub's own size check stays as a second guard.
+
+Both are candidates for upstreaming to motis-project/net. Once upstream has them, point `.pkg` back at it.
