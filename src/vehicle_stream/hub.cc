@@ -92,7 +92,8 @@ std::shared_ptr<hub> hub::create(asio::io_context& ioc,
           [&d](std::shared_ptr<void const> const& current,
                std::optional<std::vector<std::string>> const& language) {
             auto const rt = std::static_pointer_cast<motis::rt const>(current);
-            auto c = cycle{.keep_alive_ = current};
+            auto c = cycle{};
+            c.keep_alive_ = current;
             if (rt->vehicle_positions_ == nullptr) {
               return c;
             }
