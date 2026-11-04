@@ -1,6 +1,8 @@
 #include "gtest/gtest.h"
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 
 #ifdef NO_DATA
 #undef NO_DATA
@@ -13,6 +15,7 @@
 #include "motis/data.h"
 #include "motis/endpoints/routing.h"
 #include "motis/import.h"
+#include "motis/rt_update.h"
 
 namespace json = boost::json;
 using namespace std::string_view_literals;
@@ -115,8 +118,13 @@ TEST(motis, siri_fm_routing) {
                  config::timetable{
                      .first_day_ = "2019-05-01",
                      .num_days_ = 2,
+                     .canned_rt_ = true,
+                     .incremental_rt_update_ = true,
                      .preprocess_max_matching_distance_ = 0.0,
-                     .datasets_ = {{"test", {.path_ = std::string{kGTFS}}}}},
+                     .datasets_ = {
+                         {"test",
+                          {.path_ = std::string{kGTFS},
+                           .rt_ = {{{.url_ = "https://example.test/rt"}}}}}}},
              .elevators_ =
                  config::elevators{.init_ = std::string{kSiriFm},
                                    .osm_mapping_ = std::string{kElevatorIdOsm}},
@@ -127,6 +135,31 @@ TEST(motis, siri_fm_routing) {
   import(c, "test/data");
 
   auto d = data{"test/data", c};
+
+  std::filesystem::remove_all("dump_rt");
+  std::filesystem::create_directory("dump_rt");
+  auto feed = transit_realtime::FeedMessage{};
+  feed.mutable_header()->set_gtfs_realtime_version("2.0");
+  auto const body = feed.SerializeAsString();
+  std::ofstream{"dump_rt/test-https___example_test_rt", std::ios::binary}
+      .write(body.data(), static_cast<std::streamsize>(body.size()));
+  auto ioc = boost::asio::io_context{};
+  run_rt_update(ioc, c, d,
+                {.now_ = [] { return date::sys_days{2019_y / May / 1}; }});
+  ioc.run_for(100ms);
+  std::filesystem::remove_all("dump_rt");
+
+  ASSERT_NE(d.rt_->provider_rtt_, nullptr);
+  for (auto i = n::location_idx_t{0U}; i != d.tt_->n_locations(); ++i) {
+    EXPECT_EQ(d.rt_->rtt_->has_td_footpaths_out_[2].test(i),
+              d.rt_->provider_rtt_->has_td_footpaths_out_[2].test(i));
+    EXPECT_EQ(d.rt_->rtt_->has_td_footpaths_in_[2].test(i),
+              d.rt_->provider_rtt_->has_td_footpaths_in_[2].test(i));
+    EXPECT_TRUE(std::ranges::equal(d.rt_->rtt_->td_footpaths_out_[2][i],
+                                   d.rt_->provider_rtt_->td_footpaths_out_[2][i]));
+    EXPECT_TRUE(std::ranges::equal(d.rt_->rtt_->td_footpaths_in_[2][i],
+                                   d.rt_->provider_rtt_->td_footpaths_in_[2][i]));
+  }
 
   auto const routing = utl::init_from<ep::routing>(d).value();
 

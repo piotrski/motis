@@ -1,0 +1,942 @@
+#include "gmock/gmock-matchers.h"
+#include "gtest/gtest.h"
+
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <optional>
+#include <string>
+
+#include "boost/asio/io_context.hpp"
+
+#ifdef NO_DATA
+#undef NO_DATA
+#endif
+#include "gtfsrt/gtfs-realtime.pb.h"
+
+#include "nigiri/rt/frun.h"
+#include "nigiri/rt/rt_timetable.h"
+#include "net/bad_request_exception.h"
+#include "net/too_many_exception.h"
+#include "openapi/bad_request_exception.h"
+
+#include "motis/config.h"
+#include "motis/data.h"
+#include "motis/endpoints/map/vehicles.h"
+#include "motis/import.h"
+#include "motis/rt/vehicle_matching.h"
+#include "motis/rt/vehicle_observation_history.h"
+#include "motis/rt/vehicle_position.h"
+#include "motis/rt_update.h"
+#include "motis/tag_lookup.h"
+
+using namespace motis::vehicle_positions;
+using namespace testing;
+
+namespace {
+
+namespace fs = std::filesystem;
+
+std::int64_t unix_now() {
+  return std::chrono::duration_cast<std::chrono::seconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+constexpr auto const kGTFS = R"(
+# agency.txt
+agency_id,agency_name,agency_url,agency_timezone
+Test,Test,https://example.com,Europe/Berlin
+
+# stops.txt
+stop_id,stop_name,stop_lat,stop_lon
+stop-1,Stop 1,50.061,19.938
+stop-2,Stop 2,50.071,19.948
+
+# routes.txt
+route_id,agency_id,route_short_name,route_long_name,route_type
+route-1,Test,1,,3
+
+# trips.txt
+route_id,service_id,trip_id,trip_headsign
+route-1,S1,trip-1,Destination
+
+# stop_times.txt
+trip_id,arrival_time,departure_time,stop_id,stop_sequence
+trip-1,01:00:00,01:00:00,stop-1,1
+trip-1,01:05:00,01:05:00,stop-2,2
+
+# calendar_dates.txt
+service_id,date,exception_type
+S1,20260521,1
+)";
+
+struct cwd_guard {
+  explicit cwd_guard(fs::path cwd) : old_cwd_{fs::current_path()} {
+    fs::current_path(std::move(cwd));
+  }
+
+  ~cwd_guard() { fs::current_path(old_cwd_); }
+
+  fs::path old_cwd_;
+};
+
+transit_realtime::FeedMessage feed_with_vehicle(
+    double const lat = 50.061,
+    double const lon = 19.938,
+    std::string const& route_id = "route-1",
+    std::string const& trip_id = "trip-1") {
+  auto msg = transit_realtime::FeedMessage{};
+  msg.mutable_header()->set_gtfs_realtime_version("2.0");
+  msg.mutable_header()->set_incrementality(
+      transit_realtime::FeedHeader_Incrementality_FULL_DATASET);
+
+  auto* entity = msg.add_entity();
+  entity->set_id("entity-1");
+  auto* vehicle = entity->mutable_vehicle();
+  vehicle->mutable_vehicle()->set_id("veh-1");
+  vehicle->mutable_vehicle()->set_label("Vehicle 1");
+  vehicle->mutable_vehicle()->set_license_plate("KR 12345");
+  vehicle->mutable_vehicle()->set_wheelchair_accessible(
+      transit_realtime::
+          VehicleDescriptor_WheelchairAccessible_WHEELCHAIR_ACCESSIBLE);
+  vehicle->mutable_trip()->set_trip_id(trip_id);
+  vehicle->mutable_trip()->set_start_date("20260521");
+  vehicle->mutable_trip()->set_start_time("12:34:00");
+  vehicle->mutable_trip()->set_route_id(route_id);
+  vehicle->mutable_trip()->set_direction_id(1);
+  vehicle->mutable_trip()->set_schedule_relationship(
+      transit_realtime::TripDescriptor_ScheduleRelationship_SCHEDULED);
+  vehicle->mutable_position()->set_latitude(lat);
+  vehicle->mutable_position()->set_longitude(lon);
+  vehicle->mutable_position()->set_bearing(90.0F);
+  vehicle->mutable_position()->set_speed(7.5F);
+  vehicle->set_current_stop_sequence(23);
+  vehicle->set_stop_id("stop-1");
+  vehicle->set_current_status(
+      transit_realtime::VehiclePosition_VehicleStopStatus_STOPPED_AT);
+  vehicle->set_occupancy_status(
+      transit_realtime::VehiclePosition_OccupancyStatus_MANY_SEATS_AVAILABLE);
+  vehicle->set_timestamp(1789992000);
+  return msg;
+}
+
+vehicle_position position(std::string feed_id,
+                          std::string entity_id,
+                          double const lat,
+                          double const lon,
+                          std::int64_t const ingested_time = 1) {
+  return vehicle_position{.feed_id_ = std::move(feed_id),
+                          .entity_id_ = std::move(entity_id),
+                          .vehicle_ = {},
+                          .trip_ = {},
+                          .reported_position_ = {.pos_ = geo::latlng{lat, lon},
+                                                 .bearing_ = std::nullopt,
+                                                 .speed_mps_ = std::nullopt},
+                          .current_stop_sequence_ = 7U,
+                          .stop_id_ = "stop",
+                          .current_status_ = "IN_TRANSIT_TO",
+                          .occupancy_status_ = "NO_DATA_AVAILABLE",
+                          .reported_time_ = std::nullopt,
+                          .ingested_time_ = ingested_time};
+}
+
+}  // namespace
+
+TEST(motis_vehicle_positions, parses_gtfsrt_vehicle_position_fields) {
+  auto const vehicles =
+      parse_gtfsrt_vehicle_positions("krakow", feed_with_vehicle(), 1789992010);
+
+  ASSERT_THAT(vehicles, SizeIs(1));
+  auto const& vehicle = vehicles.front();
+  EXPECT_EQ(vehicle.feed_id_, "krakow");
+  EXPECT_EQ(vehicle.entity_id_, "entity-1");
+  EXPECT_EQ(vehicle.vehicle_.id_, "veh-1");
+  EXPECT_EQ(vehicle.vehicle_.label_, "Vehicle 1");
+  EXPECT_EQ(vehicle.vehicle_.license_plate_, "KR 12345");
+  EXPECT_EQ(vehicle.vehicle_.wheelchair_accessible_, "WHEELCHAIR_ACCESSIBLE");
+  EXPECT_EQ(vehicle.trip_.trip_id_, "trip-1");
+  EXPECT_EQ(vehicle.trip_.start_date_, "20260521");
+  EXPECT_EQ(vehicle.trip_.start_time_, "12:34:00");
+  EXPECT_EQ(vehicle.trip_.route_id_, "route-1");
+  EXPECT_EQ(vehicle.trip_.direction_id_, 1U);
+  EXPECT_EQ(vehicle.trip_.schedule_relationship_, "SCHEDULED");
+  EXPECT_NEAR(vehicle.reported_position_.pos_.lat_, 50.061, 0.000001);
+  EXPECT_NEAR(vehicle.reported_position_.pos_.lng_, 19.938, 0.000001);
+  ASSERT_TRUE(vehicle.reported_position_.bearing_.has_value());
+  EXPECT_DOUBLE_EQ(*vehicle.reported_position_.bearing_, 90.0);
+  ASSERT_TRUE(vehicle.reported_position_.speed_mps_.has_value());
+  EXPECT_DOUBLE_EQ(*vehicle.reported_position_.speed_mps_, 7.5);
+  EXPECT_EQ(vehicle.current_stop_sequence_, 23U);
+  EXPECT_EQ(vehicle.stop_id_, "stop-1");
+  EXPECT_EQ(vehicle.current_status_, "STOPPED_AT");
+  EXPECT_EQ(vehicle.occupancy_status_, "MANY_SEATS_AVAILABLE");
+  EXPECT_EQ(vehicle.reported_time_, 1789992000);
+  EXPECT_EQ(vehicle.ingested_time_, 1789992010);
+}
+
+TEST(motis_vehicle_positions, drops_zero_zero_vehicle_position) {
+  auto const vehicles =
+      parse_gtfsrt_vehicle_positions("krakow", feed_with_vehicle(0.0, 0.0), 1);
+
+  EXPECT_TRUE(vehicles.empty());
+}
+
+TEST(motis_vehicle_positions, drops_invalid_optional_telemetry) {
+  auto feed = feed_with_vehicle();
+  auto* reported = feed.mutable_entity(0)->mutable_vehicle()->mutable_position();
+  reported->set_bearing(std::numeric_limits<float>::quiet_NaN());
+  reported->set_speed(-1.0F);
+
+  auto const vehicles =
+      parse_gtfsrt_vehicle_positions("krakow", feed, 1789992010);
+
+  ASSERT_THAT(vehicles, SizeIs(1));
+  EXPECT_FALSE(vehicles.front().reported_position_.bearing_.has_value());
+  EXPECT_FALSE(vehicles.front().reported_position_.speed_mps_.has_value());
+}
+
+TEST(motis_vehicle_positions, rejects_reported_time_outside_int64) {
+  auto feed = feed_with_vehicle();
+  feed.mutable_entity(0)->mutable_vehicle()->set_timestamp(
+      std::numeric_limits<std::uint64_t>::max());
+
+  auto const vehicles =
+      parse_gtfsrt_vehicle_positions("krakow", feed, 1789992010);
+
+  ASSERT_THAT(vehicles, SizeIs(1));
+  EXPECT_FALSE(vehicles.front().reported_time_);
+}
+
+TEST(motis_vehicle_positions, replaces_only_the_selected_feed) {
+  auto store = vehicle_position_store{};
+  store.replace_feed("feed-a", {position("feed-a", "old", 50.0, 19.9),
+                                position("feed-a", "stale", 50.1, 19.9)});
+  store.replace_feed("feed-b", {position("feed-b", "kept", 50.2, 19.9)});
+
+  store.replace_feed("feed-a", {position("feed-a", "new", 50.3, 19.9)});
+  store.replace_feed("feed-a", {position("feed-a", "new", 50.3, 19.9)});
+
+  auto const snapshot = store.snapshot(vehicle_viewport{
+      .min_ = geo::latlng{49.9, 19.8}, .max_ = geo::latlng{50.4, 20.0}});
+  EXPECT_THAT(snapshot,
+              ElementsAre(Field(&vehicle_position::entity_id_, Eq("new")),
+                          Field(&vehicle_position::entity_id_, Eq("kept"))));
+}
+
+TEST(motis_vehicle_positions,
+     retains_a_vehicle_missing_from_one_full_snapshot) {
+  auto store = vehicle_position_store{};
+  store.replace_feed("feed", {position("feed", "vehicle", 50.0, 19.9)});
+
+  store.replace_feed("feed", {});
+
+  ASSERT_THAT(store.all(), SizeIs(1));
+  EXPECT_EQ(store.all().front().entity_id_, "vehicle");
+
+  store.replace_feed("feed", {});
+
+  EXPECT_TRUE(store.empty());
+}
+
+TEST(motis_vehicle_positions,
+     reappearance_resets_the_full_snapshot_omission_grace) {
+  auto store = vehicle_position_store{};
+  auto const vehicle = position("feed", "vehicle", 50.0, 19.9);
+  store.replace_feed("feed", {vehicle});
+  store.replace_feed("feed", {});
+  store.replace_feed("feed", {vehicle});
+
+  store.replace_feed("feed", {});
+
+  EXPECT_THAT(store.all(), SizeIs(1));
+}
+
+TEST(motis_vehicle_positions,
+     differential_deletion_bypasses_full_snapshot_omission_grace) {
+  auto store = vehicle_position_store{};
+  store.replace_feed("feed", {position("feed", "vehicle", 50.0, 19.9)});
+
+  store.update_feed("feed", {}, {"vehicle"});
+
+  EXPECT_TRUE(store.empty());
+}
+
+TEST(motis_vehicle_positions, differential_update_upserts_and_deletes) {
+  auto store = vehicle_position_store{};
+  store.replace_feed("feed", {position("feed", "replace", 50.0, 19.9),
+                              position("feed", "delete", 50.1, 19.9),
+                              position("feed", "keep", 50.2, 19.9)});
+
+  store.update_feed("feed", {position("feed", "replace", 50.3, 19.9)},
+                    {"delete"});
+
+  auto const snapshot = store.snapshot(vehicle_viewport{
+      .min_ = geo::latlng{49.9, 19.8}, .max_ = geo::latlng{50.4, 20.0}});
+  EXPECT_THAT(
+      snapshot,
+      ElementsAre(Field(&vehicle_position::entity_id_, Eq("keep")),
+                  AllOf(Field(&vehicle_position::entity_id_, Eq("replace")),
+                        Field(&vehicle_position::reported_position_,
+                              Field(&reported_position::pos_,
+                                    Eq(geo::latlng{50.3, 19.9}))))));
+}
+
+TEST(motis_vehicle_positions,
+     differential_update_supersedes_rotated_entity_id_for_same_vehicle) {
+  auto store = vehicle_position_store{};
+  auto previous = position("feed", "old-entity", 50.0, 19.9);
+  previous.vehicle_.id_ = "vehicle-1";
+  store.replace_feed("feed", {previous});
+  auto replacement = position("feed", "new-entity", 50.1, 19.9);
+  replacement.vehicle_.id_ = "vehicle-1";
+
+  store.update_feed("feed", {replacement}, {});
+
+  ASSERT_THAT(store.all(), SizeIs(1));
+  EXPECT_EQ(store.all().front().entity_id_, "new-entity");
+}
+
+TEST(motis_vehicle_positions,
+     full_snapshot_supersedes_rotated_entity_id_for_same_vehicle) {
+  auto store = vehicle_position_store{};
+  auto previous = position("feed", "old-entity", 50.0, 19.9);
+  previous.vehicle_.id_ = "vehicle-1";
+  store.replace_feed("feed", {previous});
+  auto replacement = position("feed", "new-entity", 50.1, 19.9);
+  replacement.vehicle_.id_ = "vehicle-1";
+
+  store.replace_feed("feed", {replacement});
+
+  ASSERT_THAT(store.all(), SizeIs(1));
+  EXPECT_EQ(store.all().front().entity_id_, "new-entity");
+}
+
+TEST(motis_vehicle_positions,
+     incoming_batch_keeps_newest_entity_for_each_vehicle) {
+  auto store = vehicle_position_store{};
+  auto older = position("feed", "old-entity", 50.0, 19.9, 100);
+  older.vehicle_.id_ = "vehicle-1";
+  older.reported_time_ = std::numeric_limits<std::int64_t>::max();
+  auto newer = position("feed", "new-entity", 50.1, 19.9, 200);
+  newer.vehicle_.id_ = "vehicle-1";
+
+  store.replace_feed("feed", {older, newer});
+
+  ASSERT_THAT(store.all(), SizeIs(1));
+  EXPECT_EQ(store.all().front().entity_id_, "new-entity");
+}
+
+TEST(motis_vehicle_positions, bounds_each_feed_to_the_newest_positions) {
+  auto positions = std::vector<vehicle_position>{};
+  positions.reserve(kMaxVehiclePositionsPerFeed + 1U);
+  for (auto i = std::size_t{0U}; i != kMaxVehiclePositionsPerFeed + 1U; ++i) {
+    positions.emplace_back(position("feed", std::to_string(i), 50.0, 19.9,
+                                    static_cast<std::int64_t>(i)));
+  }
+  auto store = vehicle_position_store{};
+
+  store.replace_feed("feed", std::move(positions));
+
+  EXPECT_EQ(store.all().size(), kMaxVehiclePositionsPerFeed);
+  EXPECT_EQ(std::ranges::find(store.all(), "0",
+                              &vehicle_position::entity_id_),
+            end(store.all()));
+}
+
+TEST(motis_vehicle_positions, prunes_stale_differential_entities) {
+  auto store = vehicle_position_store{};
+  store.update_feed(
+      "feed",
+      {position("feed", "stale", 50.0, 19.9, 100),
+       position("feed", "fresh", 50.1, 19.9, 200)},
+      {});
+
+  store.prune_before_ingested_time(150);
+
+  ASSERT_THAT(store.all(), SizeIs(1));
+  EXPECT_EQ(store.all().front().entity_id_, "fresh");
+}
+
+TEST(motis_vehicle_positions, default_max_age_bounds_differential_retention) {
+  EXPECT_EQ(motis::vehicle_matching::default_max_age(1U), 60);
+  EXPECT_EQ(motis::vehicle_matching::default_max_age(20U), 60);
+  EXPECT_EQ(motis::vehicle_matching::default_max_age(60U), 180);
+  EXPECT_EQ(motis::vehicle_matching::vehicle_position_retention_seconds(
+                1U, std::nullopt),
+            60);
+  EXPECT_EQ(motis::vehicle_matching::vehicle_position_retention_seconds(1U,
+                                                                        300),
+            300);
+}
+
+TEST(motis_vehicle_positions, snapshots_only_viewport_matches) {
+  auto store = vehicle_position_store{};
+  store.replace_feed("feed", {position("feed", "inside", 50.061, 19.938),
+                              position("feed", "outside", 51.0, 19.938)});
+
+  auto const snapshot = store.snapshot(vehicle_viewport{
+      .min_ = geo::latlng{50.0, 19.8}, .max_ = geo::latlng{50.2, 20.1}});
+
+  ASSERT_THAT(snapshot, SizeIs(1));
+  EXPECT_EQ(snapshot.front().entity_id_, "inside");
+}
+
+TEST(motis_vehicle_positions, snapshots_match_antimeridian_viewports) {
+  auto store = vehicle_position_store{};
+  store.replace_feed("feed", {position("feed", "east", 10.0, 179.5),
+                              position("feed", "west", 10.0, -179.5),
+                              position("feed", "outside", 10.0, 0.0)});
+
+  auto const snapshot = store.snapshot(vehicle_viewport{
+      .min_ = geo::latlng{9.0, 179.0}, .max_ = geo::latlng{11.0, -179.0}});
+
+  EXPECT_THAT(snapshot,
+              ElementsAre(Field(&vehicle_position::entity_id_, Eq("east")),
+                          Field(&vehicle_position::entity_id_, Eq("west"))));
+}
+
+TEST(motis_vehicle_positions, snapshots_exclude_stale_positions) {
+  auto store = vehicle_position_store{};
+  store.replace_feed("feed", {position("feed", "stale", 50.061, 19.938, 10),
+                              position("feed", "fresh", 50.071, 19.948, 20)});
+
+  auto const snapshot =
+      store.snapshot(vehicle_viewport{.min_ = geo::latlng{50.0, 19.8},
+                                      .max_ = geo::latlng{50.2, 20.1}},
+                     15);
+
+  ASSERT_THAT(snapshot, SizeIs(1));
+  EXPECT_EQ(snapshot.front().entity_id_, "fresh");
+}
+
+TEST(motis_vehicle_positions, endpoint_requires_viewport) {
+  auto const c = motis::config{};
+  auto rt = std::make_shared<motis::rt>();
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  EXPECT_THROW(endpoint("/api/v1/map/vehicles"),
+               openapi::bad_request_exception);
+}
+
+TEST(motis_vehicle_positions, endpoint_returns_viewport_payload) {
+  auto const c = motis::config{
+      .timetable_ = {motis::config::timetable{.update_interval_ = 15}}};
+  auto rt = std::make_shared<motis::rt>();
+  rt->vehicle_positions_->replace_feed(
+      "feed", {position("feed", "inside", 50.061, 19.938, unix_now()),
+               position("feed", "outside", 51.0, 19.938, unix_now()),
+               position("feed", "stale", 50.071, 19.948, unix_now() - 61)});
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  auto const res = endpoint(
+      "/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1"
+      "&includeUnmatched=true");
+
+  ASSERT_THAT(res.vehicles_, SizeIs(1));
+  EXPECT_EQ(res.vehicles_.front().feedId_, "feed");
+  EXPECT_EQ(res.vehicles_.front().entityId_, "inside");
+  EXPECT_DOUBLE_EQ(res.vehicles_.front().reportedPosition_.lat_, 50.061);
+  EXPECT_DOUBLE_EQ(res.vehicles_.front().reportedPosition_.lon_, 19.938);
+  EXPECT_EQ(res.vehicles_.front().currentStopSequence_, 7);
+  EXPECT_EQ(res.vehicles_.front().stopId_, "stop");
+  EXPECT_EQ(res.vehicles_.front().currentStatus_, "IN_TRANSIT_TO");
+  EXPECT_EQ(res.vehicles_.front().occupancyStatus_, "NO_DATA_AVAILABLE");
+}
+
+TEST(motis_vehicle_positions, endpoint_freshness_uses_reported_time) {
+  auto const c = motis::config{
+      .timetable_ = {motis::config::timetable{.update_interval_ = 15}}};
+  auto rt = std::make_shared<motis::rt>();
+  auto stale_report =
+      position("feed", "stale-report", 50.061, 19.938, unix_now());
+  stale_report.reported_time_ = unix_now() - 61;
+  rt->vehicle_positions_->replace_feed("feed", {stale_report});
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  auto const res = endpoint(
+      "/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1"
+      "&includeUnmatched=true");
+
+  EXPECT_TRUE(res.vehicles_.empty());
+}
+
+TEST(motis_vehicle_positions, endpoint_freshness_falls_back_to_ingested_time) {
+  auto const c = motis::config{
+      .timetable_ = {motis::config::timetable{.update_interval_ = 15}}};
+  auto rt = std::make_shared<motis::rt>();
+  rt->vehicle_positions_->replace_feed(
+      "feed", {position("feed", "fresh", 50.061, 19.938, unix_now()),
+               position("feed", "stale", 50.071, 19.948, unix_now() - 61)});
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  auto const res = endpoint(
+      "/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1"
+      "&includeUnmatched=true");
+
+  ASSERT_THAT(res.vehicles_, SizeIs(1));
+  EXPECT_EQ(res.vehicles_.front().entityId_, "fresh");
+}
+
+TEST(motis_vehicle_positions, endpoint_max_age_overrides_default) {
+  auto const c = motis::config{
+      .timetable_ = {motis::config::timetable{.update_interval_ = 15}}};
+  auto rt = std::make_shared<motis::rt>();
+  rt->vehicle_positions_->replace_feed(
+      "feed",
+      {position("feed", "forty-seconds-old", 50.061, 19.938, unix_now() - 40),
+       position("feed", "ninety-seconds-old", 50.071, 19.948,
+                unix_now() - 90)});
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  auto const smaller = endpoint(
+      "/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1&maxAge=30"
+      "&includeUnmatched=true");
+  auto const larger = endpoint(
+      "/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1&maxAge=120"
+      "&includeUnmatched=true");
+
+  EXPECT_TRUE(smaller.vehicles_.empty());
+  EXPECT_THAT(larger.vehicles_,
+              ElementsAre(Field(&motis::api::VehiclePosition::entityId_,
+                                Eq("forty-seconds-old")),
+                          Field(&motis::api::VehiclePosition::entityId_,
+                                Eq("ninety-seconds-old"))));
+}
+
+TEST(motis_vehicle_positions, endpoint_rejects_negative_max_age) {
+  auto const c = motis::config{};
+  auto rt = std::make_shared<motis::rt>();
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  EXPECT_THROW(endpoint("/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1"
+                        "&maxAge=-1"),
+               net::bad_request_exception);
+}
+
+TEST(motis_vehicle_positions, endpoint_accepts_extreme_max_age) {
+  auto const c = motis::config{};
+  auto rt = std::make_shared<motis::rt>();
+  rt->vehicle_positions_->replace_feed(
+      "feed", {position("feed", "ancient", 50.061, 19.938, 1)});
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  auto const res = endpoint(
+      "/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1"
+      "&maxAge=9223372036854775807&includeUnmatched=true");
+
+  ASSERT_THAT(res.vehicles_, SizeIs(1));
+  EXPECT_EQ(res.vehicles_.front().entityId_, "ancient");
+}
+
+TEST(motis_vehicle_positions, endpoint_bounds_world_viewport_candidates) {
+  auto const c = motis::config{};
+  auto rt = std::make_shared<motis::rt>();
+  auto positions = std::vector<vehicle_position>{};
+  positions.reserve(10'001U);
+  for (auto i = 0U; i != 10'001U; ++i) {
+    positions.emplace_back(
+        position("feed", std::to_string(i), 50.061, 19.938, unix_now()));
+  }
+  rt->vehicle_positions_->replace_feed("feed", std::move(positions));
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  EXPECT_THROW(endpoint("/api/v1/map/vehicles?min=-90,-180&max=90,180"
+                        "&includeUnmatched=true"),
+               net::too_many_exception);
+}
+
+TEST(motis_vehicle_positions, freshness_cutoff_is_saturating_and_inclusive) {
+  auto constexpr kMin = std::numeric_limits<std::int64_t>::min();
+  EXPECT_EQ(motis::vehicle_matching::freshness_cutoff(kMin + 5, 10), kMin);
+  EXPECT_EQ(motis::vehicle_matching::freshness_cutoff(
+                100, std::numeric_limits<std::int64_t>::max()),
+            kMin + 101);
+
+  auto at_cutoff = position("feed", "boundary", 50.061, 19.938, 40);
+  EXPECT_TRUE(motis::vehicle_matching::is_fresh(at_cutoff, 40, 40));
+  at_cutoff.ingested_time_ = 39;
+  EXPECT_FALSE(motis::vehicle_matching::is_fresh(at_cutoff, 40, 40));
+}
+
+TEST(motis_vehicle_positions, dataset_tag_preserves_colons_before_feed_hash) {
+  EXPECT_EQ("krakow:tram",
+            motis::vehicle_matching::dataset_tag("krakow:tram:12345"));
+  EXPECT_EQ("krakow", motis::vehicle_matching::dataset_tag("krakow"));
+}
+
+TEST(motis_vehicle_positions,
+     endpoint_unmatched_and_freshness_filters_compose) {
+  auto const c = motis::config{
+      .timetable_ = {motis::config::timetable{.update_interval_ = 15}}};
+  auto rt = std::make_shared<motis::rt>();
+  rt->vehicle_positions_->replace_feed(
+      "feed",
+      {position("feed", "fresh-unmatched", 50.061, 19.938, unix_now()),
+       position("feed", "stale-unmatched", 50.071, 19.948, unix_now() - 61)});
+  auto endpoint = motis::ep::vehicles{.config_ = c, .rt_ = rt};
+
+  auto const default_res =
+      endpoint("/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1");
+  auto const debug_res = endpoint(
+      "/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1"
+      "&includeUnmatched=true");
+
+  EXPECT_TRUE(default_res.vehicles_.empty());
+  ASSERT_THAT(debug_res.vehicles_, SizeIs(1));
+  EXPECT_EQ(debug_res.vehicles_.front().entityId_, "fresh-unmatched");
+  EXPECT_EQ(debug_res.vehicles_.front().matchState_,
+            motis::api::VehicleMatchStateEnum::UNMATCHED);
+}
+
+TEST(motis_vehicle_positions, rt_update_consumes_vehicle_only_gtfsrt_feed) {
+  auto const test_dir = fs::absolute("test/data/vehicle-only-rt-update");
+  auto ec = std::error_code{};
+  fs::remove_all(test_dir, ec);
+  fs::create_directories(test_dir);
+  auto cwd = cwd_guard{test_dir};
+
+  auto const c = motis::config{
+      .timetable_ = {motis::config::timetable{
+          .first_day_ = "2026-05-21",
+          .num_days_ = 2,
+          .update_interval_ = 1,
+          .canned_rt_ = true,
+          .datasets_ = {{"test",
+                         {.path_ = kGTFS,
+                          .rt_ = {{{.url_ = "https://example.test/"
+                                            "vehicle_positions"}}}}}},
+          .vehicle_eta_ =
+              motis::config::timetable::vehicle_eta{
+                  .mode_ = motis::config::timetable::vehicle_eta::mode::shadow,
+                  .history_ = {.max_age_seconds_ = 300,
+                               .max_observations_per_vehicle_ = 4U}}}}};
+
+  motis::import(c, "data");
+  auto d = motis::data{"data", c};
+
+  fs::create_directory("dump_rt");
+  auto feed = feed_with_vehicle(50.061, 19.938, "prefix-route-1");
+  auto* alert_entity = feed.add_entity();
+  alert_entity->set_id("alert-1");
+  auto* alert = alert_entity->mutable_alert();
+  alert->mutable_header_text()->add_translation()->set_text("Service alert");
+  alert->add_informed_entity()->set_route_id("route-1");
+  feed.mutable_entity(0)->mutable_vehicle()->mutable_trip()->set_start_time(
+      "01:00:00");
+  feed.mutable_entity(0)->mutable_vehicle()->clear_timestamp();
+  auto dump = std::ofstream{
+      "dump_rt/test-https___example_test_"
+      "vehicle_positions",
+      std::ios::binary};
+  ASSERT_TRUE(dump.good());
+  auto const bytes = feed.SerializeAsString();
+  dump.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  dump.close();
+
+  auto current_time = std::chrono::system_clock::now();
+  auto ioc = boost::asio::io_context{};
+  auto applied_non_vehicle_entities = false;
+  motis::run_rt_update(ioc, c, d,
+                       {.now_ = [&current_time] { return current_time; },
+                        .after_gtfsrt_apply_ =
+                            [&](std::size_t, bool) {
+                              applied_non_vehicle_entities = true;
+                            }});
+  ioc.run_for(std::chrono::milliseconds{100});
+
+  EXPECT_TRUE(applied_non_vehicle_entities);
+  EXPECT_EQ(d.rt_->rtt_->alerts_.header_text_.size(), 1U);
+
+  auto const snapshot = d.rt_->vehicle_positions_->snapshot(vehicle_viewport{
+      .min_ = geo::latlng{50.0, 19.8}, .max_ = geo::latlng{50.2, 20.1}});
+
+  ASSERT_THAT(snapshot, SizeIs(1));
+  auto const first_ingested_time = snapshot.front().ingested_time_;
+  EXPECT_EQ(snapshot.front().entity_id_, "entity-1");
+  EXPECT_EQ(snapshot.front().trip_.trip_id_, "trip-1");
+  EXPECT_EQ(snapshot.front().stop_id_, "stop-1");
+  ASSERT_NE(d.rt_->vehicle_observation_history_, nullptr);
+  auto const history_key =
+      motis::vehicle_key{snapshot.front().feed_id_, "veh-1",
+                         motis::vehicle_key_source::kVehicleDescriptor};
+  EXPECT_THAT(d.rt_->vehicle_observation_history_->observations(history_key),
+              SizeIs(1));
+  ASSERT_NE(
+      d.rt_->vehicle_observation_history_->current_observation(history_key),
+      nullptr);
+  EXPECT_EQ(
+      d.rt_->vehicle_observation_history_->current_observation(history_key)
+          ->entity_id_,
+      "entity-1");
+  auto const first_published_rt = std::atomic_load(&d.rt_);
+
+  auto endpoint = motis::ep::vehicles{.tags_ = d.tags_.get(),
+                                      .tt_ = d.tt_.get(),
+                                      .shapes_ = d.shapes_.get(),
+                                      .config_ = c,
+                                      .rt_ = d.rt_};
+  auto const res = endpoint("/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1");
+
+  ASSERT_THAT(res.vehicles_, SizeIs(1));
+  EXPECT_EQ(res.vehicles_.front().matchState_,
+            motis::api::VehicleMatchStateEnum::MATCHED_TRIP);
+  ASSERT_TRUE(res.vehicles_.front().route_.has_value());
+  EXPECT_EQ(res.vehicles_.front().route_->shortName_, "1");
+  ASSERT_TRUE(res.vehicles_.front().trip_.scheduledTripId_.has_value());
+  EXPECT_NE(res.vehicles_.front().trip_.scheduledTripId_, "trip-1");
+  EXPECT_THAT(*res.vehicles_.front().trip_.scheduledTripId_,
+              testing::HasSubstr("trip-1"));
+  EXPECT_EQ(res.vehicles_.front().trip_.routeId_, "prefix-route-1");
+  EXPECT_EQ(res.vehicles_.front().route_->id_, "route-1");
+  ASSERT_TRUE(res.vehicles_.front().mode_.has_value());
+  EXPECT_EQ(res.vehicles_.front().mode_, motis::api::ModeEnum::BUS);
+  ASSERT_TRUE(res.vehicles_.front().shape_.has_value());
+  EXPECT_GT(res.vehicles_.front().shape_->length_, 0);
+  ASSERT_TRUE(res.vehicles_.front().shapeId_.has_value());
+
+  auto const without_shapes = endpoint(
+      "/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1&includeShapes=false");
+  ASSERT_THAT(without_shapes.vehicles_, SizeIs(1));
+  EXPECT_FALSE(without_shapes.vehicles_.front().shape_.has_value());
+  EXPECT_EQ(without_shapes.vehicles_.front().shapeId_,
+            res.vehicles_.front().shapeId_);
+
+  auto route_only_rt = std::make_shared<motis::rt>();
+  auto route_only =
+      position("test:manual", "route-only", 50.061, 19.938, unix_now());
+  route_only.trip_.route_id_ = "route-1";
+  route_only.trip_.direction_id_ = 1U;
+  route_only_rt->vehicle_positions_->replace_feed("test:manual", {route_only});
+  auto route_only_endpoint = motis::ep::vehicles{.tags_ = d.tags_.get(),
+                                                 .tt_ = d.tt_.get(),
+                                                 .shapes_ = d.shapes_.get(),
+                                                 .config_ = c,
+                                                 .rt_ = route_only_rt};
+  auto const route_only_res =
+      route_only_endpoint("/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1");
+  ASSERT_THAT(route_only_res.vehicles_, SizeIs(1));
+  EXPECT_EQ(route_only_res.vehicles_.front().matchState_,
+            motis::api::VehicleMatchStateEnum::MATCHED_ROUTE_ONLY);
+  EXPECT_TRUE(route_only_res.vehicles_.front().route_.has_value());
+  EXPECT_TRUE(route_only_res.vehicles_.front().mode_.has_value());
+  EXPECT_FALSE(route_only_res.vehicles_.front().trip_.headsign_.has_value());
+  EXPECT_FALSE(route_only_res.vehicles_.front().shape_.has_value());
+  EXPECT_FALSE(route_only_res.vehicles_.front().shapeId_.has_value());
+
+  auto unmatched = position("unknown", "unmatched", 50.061, 19.938, unix_now());
+  auto unmatched_rt = std::make_shared<motis::rt>();
+  unmatched_rt->vehicle_positions_->replace_feed("unknown", {unmatched});
+  auto unmatched_endpoint = motis::ep::vehicles{.tags_ = d.tags_.get(),
+                                                .tt_ = d.tt_.get(),
+                                                .shapes_ = d.shapes_.get(),
+                                                .config_ = c,
+                                                .rt_ = unmatched_rt};
+  auto const unmatched_default =
+      unmatched_endpoint("/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1");
+  auto const unmatched_debug = unmatched_endpoint(
+      "/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1"
+      "&includeUnmatched=true");
+  EXPECT_TRUE(unmatched_default.vehicles_.empty());
+  ASSERT_THAT(unmatched_debug.vehicles_, SizeIs(1));
+  EXPECT_EQ(unmatched_debug.vehicles_.front().matchState_,
+            motis::api::VehicleMatchStateEnum::UNMATCHED);
+
+  auto const target_id = *res.vehicles_.front().trip_.scheduledTripId_;
+  auto const [target_run, _] =
+      d.tags_->get_trip(*d.tt_, d.rt_->rtt_.get(), target_id);
+  auto const target = nigiri::rt::frun{*d.tt_, d.rt_->rtt_.get(), target_run};
+  auto select = [&](std::vector<vehicle_position> candidates) {
+    auto store = vehicle_position_store{};
+    store.replace_feed("test", std::move(candidates));
+    return motis::vehicle_matching::primary_vehicle(
+        *d.tags_, *d.tt_, d.rt_->rtt_.get(), d.shapes_.get(), store, target, 0,
+        200, nigiri::lang_t{});
+  };
+  auto candidate = snapshot.front();
+  candidate.feed_id_ = "test";
+  candidate.reported_time_ = 100;
+
+  auto const single = select({candidate});
+  ASSERT_TRUE(single.has_value());
+  EXPECT_EQ(single->entityId_, "entity-1");
+
+  auto stale_candidate = candidate;
+  stale_candidate.reported_time_ = -1;
+  stale_candidate.ingested_time_ = 100;
+  EXPECT_FALSE(select({stale_candidate}).has_value());
+
+  auto missing_reported_time = candidate;
+  missing_reported_time.reported_time_ = std::nullopt;
+  missing_reported_time.ingested_time_ = 100;
+  EXPECT_TRUE(select({missing_reported_time}).has_value());
+
+  auto future_stale_candidate = candidate;
+  future_stale_candidate.entity_id_ = "future-stale";
+  future_stale_candidate.reported_time_ = 1'000;
+  future_stale_candidate.ingested_time_ = -1;
+  EXPECT_FALSE(select({future_stale_candidate}).has_value());
+
+  auto future_candidate = candidate;
+  future_candidate.entity_id_ = "future";
+  future_candidate.reported_time_ = 1'000;
+  future_candidate.ingested_time_ = 99;
+  auto const current_selected = select({future_candidate, candidate});
+  ASSERT_TRUE(current_selected.has_value());
+  EXPECT_EQ(current_selected->entityId_, "entity-1");
+
+  auto unrelated = candidate;
+  unrelated.entity_id_ = "unrelated";
+  unrelated.trip_.trip_id_ = "other-trip";
+  EXPECT_FALSE(select({unrelated}).has_value());
+
+  auto other_service_day = candidate;
+  other_service_day.entity_id_ = "other-service-day";
+  other_service_day.trip_.start_date_ = "20260522";
+  EXPECT_FALSE(select({other_service_day}).has_value());
+
+  auto route_only_candidate = candidate;
+  route_only_candidate.entity_id_ = "route-only";
+  route_only_candidate.trip_.start_time_ = "12:34:00";
+  auto const route_only_single = select({route_only_candidate});
+  ASSERT_TRUE(route_only_single.has_value());
+  EXPECT_EQ(route_only_single->entityId_, "route-only");
+  auto exact_candidate = candidate;
+  exact_candidate.entity_id_ = "exact";
+  auto exact_selected = select({route_only_candidate, exact_candidate});
+  ASSERT_TRUE(exact_selected.has_value());
+  EXPECT_EQ(exact_selected->entityId_, "exact");
+
+  auto no_vehicle_id = candidate;
+  no_vehicle_id.entity_id_ = "no-vehicle-id";
+  no_vehicle_id.vehicle_.id_ = std::nullopt;
+  auto with_vehicle_id = candidate;
+  with_vehicle_id.entity_id_ = "with-vehicle-id";
+  auto vehicle_id_selected = select({no_vehicle_id, with_vehicle_id});
+  ASSERT_TRUE(vehicle_id_selected.has_value());
+  EXPECT_EQ(vehicle_id_selected->entityId_, "with-vehicle-id");
+
+  auto inconsistent = candidate;
+  inconsistent.entity_id_ = "inconsistent";
+  inconsistent.trip_.route_id_ = "wrong-route";
+  inconsistent.trip_.direction_id_ = 0U;
+  inconsistent.stop_id_ = "wrong-stop";
+  auto consistent = candidate;
+  consistent.entity_id_ = "consistent";
+  consistent.trip_.route_id_ = "prefix-route-1";
+  consistent.trip_.direction_id_ = 0U;
+  consistent.stop_id_ = "stop-1";
+  auto consistency_selected = select({inconsistent, consistent});
+  ASSERT_TRUE(consistency_selected.has_value());
+  EXPECT_EQ(consistency_selected->entityId_, "consistent");
+
+  auto unrelated_route = candidate;
+  unrelated_route.entity_id_ = "a-unrelated-route";
+  unrelated_route.trip_.start_time_ = "12:34:00";
+  unrelated_route.trip_.route_id_ = "wrong-route";
+  auto canonical_prefixed_route = candidate;
+  canonical_prefixed_route.entity_id_ = "z-canonical-prefixed-route";
+  canonical_prefixed_route.trip_.start_time_ = "12:34:00";
+  canonical_prefixed_route.trip_.route_id_ = "prefix-route-1";
+  auto route_only_selected =
+      select({unrelated_route, canonical_prefixed_route});
+  ASSERT_TRUE(route_only_selected.has_value());
+  EXPECT_EQ(route_only_selected->entityId_, "z-canonical-prefixed-route");
+
+  auto accidental_suffix = candidate;
+  accidental_suffix.entity_id_ = "z-accidental-route-suffix";
+  accidental_suffix.trip_.route_id_ = "expressroute-1";
+  auto neutral_route = candidate;
+  neutral_route.entity_id_ = "a-neutral-route";
+  neutral_route.trip_.route_id_ = "wrong-route";
+  auto suffix_selected = select({accidental_suffix, neutral_route});
+  ASSERT_TRUE(suffix_selected.has_value());
+  EXPECT_EQ(suffix_selected->entityId_, "a-neutral-route");
+
+  auto older = candidate;
+  older.entity_id_ = "older";
+  older.reported_time_ = 100;
+  auto newer = candidate;
+  newer.entity_id_ = "newer";
+  newer.reported_time_ = 200;
+  auto freshness_selected = select({older, newer});
+  ASSERT_TRUE(freshness_selected.has_value());
+  EXPECT_EQ(freshness_selected->entityId_, "newer");
+
+  auto stable_b = candidate;
+  stable_b.entity_id_ = "b";
+  auto stable_a = candidate;
+  stable_a.entity_id_ = "a";
+  auto stable_selected = select({stable_b, stable_a});
+  ASSERT_TRUE(stable_selected.has_value());
+  EXPECT_EQ(stable_selected->entityId_, "a");
+
+  auto differential = feed_with_vehicle(50.071, 19.948);
+  differential.mutable_header()->set_incrementality(
+      transit_realtime::FeedHeader_Incrementality_DIFFERENTIAL);
+  differential.mutable_entity(0)->set_id("entity-2");
+  differential.mutable_entity(0)->mutable_vehicle()->mutable_vehicle()->set_id(
+      "veh-2");
+  differential.mutable_entity(0)->mutable_vehicle()->set_timestamp(1U);
+  auto differential_dump =
+      std::ofstream{"dump_rt/test-https___example_test_vehicle_positions",
+                    std::ios::binary | std::ios::trunc};
+  ASSERT_TRUE(differential_dump.good());
+  auto const differential_bytes = differential.SerializeAsString();
+  differential_dump.write(
+      differential_bytes.data(),
+      static_cast<std::streamsize>(differential_bytes.size()));
+  differential_dump.close();
+
+  current_time += std::chrono::minutes{1};
+  ioc.restart();
+  ioc.run_for(std::chrono::milliseconds{1100});
+  auto const differential_snapshot =
+      d.rt_->vehicle_positions_->snapshot(vehicle_viewport{
+          .min_ = geo::latlng{50.0, 19.8}, .max_ = geo::latlng{50.2, 20.1}});
+  EXPECT_THAT(
+      differential_snapshot,
+      ElementsAre(Field(&vehicle_position::entity_id_, Eq("entity-1")),
+                  Field(&vehicle_position::entity_id_, Eq("entity-2"))));
+  EXPECT_EQ(differential_snapshot.front().ingested_time_, first_ingested_time);
+  EXPECT_GT(differential_snapshot.back().ingested_time_, first_ingested_time);
+  EXPECT_EQ(differential_snapshot.back().reported_time_,
+            differential_snapshot.back().ingested_time_);
+  auto const second_ingested_time = differential_snapshot.back().ingested_time_;
+  ASSERT_NE(d.rt_->vehicle_observation_history_, nullptr);
+  EXPECT_EQ(d.rt_->vehicle_observation_history_->active_histories(), 2U);
+  EXPECT_EQ(d.rt_->vehicle_observation_history_->observation_count(), 2U);
+
+  auto invalid_dump =
+      std::ofstream{"dump_rt/test-https___example_test_vehicle_positions",
+                    std::ios::binary | std::ios::trunc};
+  ASSERT_TRUE(invalid_dump.good());
+  invalid_dump << "malformed";
+  invalid_dump.close();
+
+  current_time += std::chrono::minutes{1};
+  ioc.restart();
+  ioc.run_for(std::chrono::milliseconds{1100});
+  auto const fallback_snapshot =
+      d.rt_->vehicle_positions_->snapshot(vehicle_viewport{
+          .min_ = geo::latlng{50.0, 19.8}, .max_ = geo::latlng{50.2, 20.1}});
+  ASSERT_THAT(fallback_snapshot, SizeIs(2));
+  EXPECT_EQ(fallback_snapshot.front().ingested_time_, first_ingested_time);
+  EXPECT_EQ(fallback_snapshot.back().ingested_time_, second_ingested_time);
+  EXPECT_EQ(d.rt_->vehicle_observation_history_->observation_count(), 2U);
+
+  auto const replay_endpoint = motis::ep::vehicles{.tags_ = d.tags_.get(),
+                                                   .tt_ = d.tt_.get(),
+                                                   .shapes_ = d.shapes_.get(),
+                                                   .config_ = c,
+                                                   .rt_ = d.rt_};
+  EXPECT_THAT(replay_endpoint("/api/v1/map/vehicles?min=50.0,19.8&max=50.2,20.1"
+                              "&maxAge=180")
+                  .vehicles_,
+              SizeIs(2));
+
+  ASSERT_NE(first_published_rt->vehicle_observation_history_, nullptr);
+  EXPECT_EQ(
+      first_published_rt->vehicle_observation_history_->active_histories(), 1U);
+  EXPECT_EQ(first_published_rt->vehicle_positions_->all().size(), 1U);
+}

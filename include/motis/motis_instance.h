@@ -22,6 +22,7 @@
 #include "motis/endpoints/map/shapes_debug.h"
 #include "motis/endpoints/map/stops.h"
 #include "motis/endpoints/map/trips.h"
+#include "motis/endpoints/map/vehicles.h"
 #include "motis/endpoints/matches.h"
 #include "motis/endpoints/metrics.h"
 #include "motis/endpoints/ojp.h"
@@ -39,6 +40,7 @@
 #include "motis/gbfs/update.h"
 #include "motis/metrics_registry.h"
 #include "motis/rt_update.h"
+#include "motis/vehicle_stream/hub.h"
 
 namespace motis {
 
@@ -108,13 +110,16 @@ struct motis_instance {
     GET<ep::stop_times>("/api/v1/stoptimes", d);
     GET<ep::stop_times>("/api/v4/stoptimes", d);
     GET<ep::stop_times>("/api/v5/stoptimes", d);
+    GET<ep::stop_times>("/api/v6/stoptimes", d);
     GET<ep::trip>("/api/v1/trip", d);
     GET<ep::trip>("/api/v2/trip", d);
     GET<ep::trip>("/api/v4/trip", d);
     GET<ep::trip>("/api/v5/trip", d);
+    GET<ep::trip>("/api/v6/trip", d);
     GET<ep::trips>("/api/v1/map/trips", d);
     GET<ep::trips>("/api/v4/map/trips", d);
     GET<ep::trips>("/api/v5/map/trips", d);
+    GET<ep::vehicles>("/api/v1/map/vehicles", d);
     GET<ep::stops>("/api/v1/map/stops", d);
     GET<ep::route_details>("/api/experimental/map/route-details", d);
     GET<ep::routes>("/api/experimental/map/routes", d);
@@ -161,6 +166,15 @@ struct motis_instance {
               ep::metrics{d.tt_.get(), d.tags_.get(), d.rt_, d.metrics_.get()});
     qr_.route("GET", "/gtfsrt",
               ep::gtfsrt{c, d.tt_.get(), d.tags_.get(), d.rt_});
+    if constexpr (requires(Executor& e) { e.io_; }) {
+      // `io_` is a reference, still valid after `exec` was moved into `qr_`.
+      vehicle_stream_ = vehicle_stream::hub::create(exec.io_, d, c);
+      qr_.get(std::string{vehicle_stream::kPath} + "/stats",
+              [s = vehicle_stream_](boost::urls::url_view const&) {
+                return s->stats();
+              });
+    }
+
     qr_.serve_files(c.server_.value_or(config::server{}).web_folder_);
     qr_.enable_cors();
   }
@@ -180,6 +194,10 @@ struct motis_instance {
   }
 
   void run(data& d, config const& c) {
+    if (vehicle_stream_ != nullptr) {
+      vehicle_stream_->start();
+    }
+
     if (d.w_ && d.l_ && c.has_gbfs_feeds()) {
       gbfs_ = io_thread{"motis gbfs update", [&](boost::asio::io_context& ioc) {
                           gbfs::run_gbfs_update(ioc, c, *d.w_, *d.l_, d.gbfs_,
@@ -195,6 +213,9 @@ struct motis_instance {
   }
 
   void stop() {
+    if (vehicle_stream_ != nullptr) {
+      vehicle_stream_->stop();
+    }
     rt_.stop();
     gbfs_.stop();
   }
@@ -205,6 +226,7 @@ struct motis_instance {
   }
 
   net::query_router<Executor> qr_{};
+  std::shared_ptr<vehicle_stream::hub> vehicle_stream_;
   io_thread rt_, gbfs_;
 };
 

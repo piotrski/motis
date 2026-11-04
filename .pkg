@@ -23,9 +23,9 @@
   branch=master
   commit=7b64fca6ea0833628d6f86255a81424365f7cc0c
 [net]
-  url=git@github.com:motis-project/net.git
-  branch=master
-  commit=f34174004e31f392e7ee787bfeb304adcfd5e8d2
+  url=https://github.com/piotrski/net.git
+  branch=feat/ws-strand-and-message-limit
+  commit=10d9a5b2aff48f0578ae9d15789b149982b0cce2
 [openapi-cpp]
   url=git@github.com:triptix-tech/openapi-cpp.git
   branch=master
