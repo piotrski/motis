@@ -55,7 +55,7 @@ jobs:
           )
 
           gh label create maintenance --color 6e7781 \
-            --description "Fork upkeep such as upstream syncs" 2>/dev/null || true
+            --description "Fork upkeep such as upstream syncs" --force
 
           EXISTING=$(gh issue list --state open --search "Upstream MOTIS sync needed in:title" --json number --jq '.[0].number')
           if [ -n "$EXISTING" ]; then
@@ -68,6 +68,8 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The job adds an `upstream` remote, so without this gh targets motis-project/motis.
+          GH_REPO: ${{ github.repository }}
           MASTER_BEHIND: ${{ steps.divergence.outputs.master_behind }}
           MASTER_AHEAD: ${{ steps.divergence.outputs.master_ahead }}
           PATCHES_BEHIND: ${{ steps.divergence.outputs.patches_behind }}
