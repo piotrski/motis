@@ -22,6 +22,15 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
   - `nigiri-test --gtest_filter='rt.block_terminal*:join_split.*'`
   - `nigiri-test --gtest_filter='rt.*'`
 
+### GTFS-RT version-switch twin trips
+
+- Status: still required while ZTP Kraków feed A labels post-midnight trips with the next timetable version's trip_id on version-switch nights. Not upstream.
+- Source: `piotrski/nigiri@fix/gtfsrt-version-switch-twin` (on top of the block terminal patch; `.pkg` pins `branch=fix/gtfsrt-adjacent-service-day`, which is fast-forwarded to the pinned commit)
+- Purpose: for a TripUpdate without `start_date`, compare each realtime time with the scheduled time of its own stop (matched by stop_sequence first, then stop_id; skipped stops only advance the match; a stop_id match is not used when the stop_sequence names a later visit of a loop stop). If every time is 12 h or more off and a whole number of days off (within 3 h), use the same trip on the service day the realtime implies, or a twin trip (same route, direction, stops, relative scheduled times and local departure time) on that day, with stop_sequence values translated to the twin's numbering; if no such run exists, drop the update. Vehicles that are just very late or early keep their run. Without it, Kraków buses showed "−23 h 59 min" on 2026-11-03 00:00–04:00 and the running trips had no realtime.
+- Tests to run:
+  - `nigiri-test --gtest_filter='rt.gtfsrt_version_switch_twin'`
+  - `nigiri-test --gtest_filter='rt.*'`
+
 ### GTFS-RT service day inference
 
 - Status: still required
