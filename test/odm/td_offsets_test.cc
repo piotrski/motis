@@ -15,7 +15,8 @@ void print(td_offsets_t const& tdos) {
     for (auto const& t : tdo) {
       std::cout << "[valid_from_: " << t.valid_from_
                 << ", duration_: " << t.duration_
-                << ", transport_mode_id_: " << t.transport_mode_id_ << "]\n";
+                << ", transport_mode_payload_: " << t.transport_mode_payload_
+                << "]\n";
     }
   }
 }
@@ -35,14 +36,14 @@ TEST(odm, get_td_offsets_basic) {
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].valid_from_, unixtime_t{10h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].valid_from_,
             unixtime_t{10h + 1min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_payload_,
             kOdmTransportModeId);
 }
 
@@ -68,14 +69,14 @@ TEST(odm, get_td_offsets_extension) {
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].valid_from_, unixtime_t{10h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].valid_from_,
             unixtime_t{10h + 3min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_payload_,
             kOdmTransportModeId);
 }
 
@@ -101,14 +102,14 @@ TEST(odm, get_td_offsets_extension_reverse) {
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].valid_from_, unixtime_t{10h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].valid_from_,
             unixtime_t{10h + 3min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_payload_,
             kOdmTransportModeId);
 }
 
@@ -134,14 +135,14 @@ TEST(odm, get_td_offsets_extension_fill_gap) {
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].valid_from_, unixtime_t{10h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].valid_from_,
             unixtime_t{10h + 3min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_payload_,
             kOdmTransportModeId);
 }
 
@@ -166,35 +167,35 @@ TEST(odm, get_td_offsets_intermittent) {
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].valid_from_, unixtime_t{10h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_payload_,
             kOdmTransportModeId);
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].valid_from_,
             unixtime_t{10h + 1min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].valid_from_, unixtime_t{11h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].transport_mode_payload_,
             kOdmTransportModeId);
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].valid_from_,
             unixtime_t{11h + 1min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[4].valid_from_, unixtime_t{12h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[4].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[4].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[4].transport_mode_payload_,
             kOdmTransportModeId);
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[5].valid_from_,
             unixtime_t{12h + 1min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[5].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[5].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[5].transport_mode_payload_,
             kOdmTransportModeId);
 }
 
@@ -220,26 +221,26 @@ TEST(odm, get_td_offsets_long_short_long) {
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].valid_from_, unixtime_t{10h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].valid_from_,
             unixtime_t{10h + 1min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].duration_, 30min);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].valid_from_,
             unixtime_t{10h + 2min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].valid_from_,
             unixtime_t{10h + 3min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].transport_mode_payload_,
             kOdmTransportModeId);
 }
 
@@ -271,26 +272,26 @@ TEST(odm, get_td_offsets_late_improvement) {
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].valid_from_, unixtime_t{10h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].valid_from_,
             unixtime_t{10h + 2min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].duration_, 30min);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].valid_from_,
             unixtime_t{10h + 3min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[2].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].valid_from_,
             unixtime_t{10h + 4min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[3].transport_mode_payload_,
             kOdmTransportModeId);
 }
 
@@ -322,14 +323,14 @@ TEST(odm, get_td_offsets_late_worse) {
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].valid_from_, unixtime_t{10h});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].duration_, 1h);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[0].transport_mode_payload_,
             kOdmTransportModeId);
 
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].valid_from_,
             unixtime_t{10h + 4min});
   EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].duration_,
             footpath::kMaxDuration);
-  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_id_,
+  EXPECT_EQ(td_offsets.at(location_idx_t{1U})[1].transport_mode_payload_,
             kOdmTransportModeId);
 }
 

@@ -143,8 +143,8 @@ n::routing::td_offsets_t get_td_offsets(
                         return n::routing::td_offset{
                             .valid_from_ = fp.valid_from_,
                             .duration_ = fp.duration_,
-                            .transport_mode_id_ =
-                                static_cast<n::transport_mode_id_t>(profile)};
+                            .transport_mode_payload_ =
+                                static_cast<transport_mode_id_t>(profile)};
                       }));
         });
   }
@@ -332,10 +332,10 @@ std::vector<n::routing::offset> get_offsets(
       auto const paths = route(profile, nullptr);
       for (auto const [p, l] : utl::zip(paths, near_stops)) {
         if (p.has_value()) {
-          offsets.emplace_back(
-              l,
-              n::duration_t{static_cast<unsigned>(std::ceil(p->duration_.count() / 60.0))},
-              static_cast<n::transport_mode_id_t>(profile));
+          offsets.emplace_back(l,
+                               n::duration_t{static_cast<unsigned>(
+                                   std::ceil(p->duration_.count() / 60.0))},
+                               static_cast<transport_mode_id_t>(profile));
         }
       }
     }

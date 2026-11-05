@@ -28,8 +28,7 @@ default_output::default_output(osr::ways const& w,
       profile_{profile},
       id_{static_cast<std::underlying_type_t<osr::search_profile>>(profile)} {}
 
-default_output::default_output(osr::ways const& w,
-                               nigiri::transport_mode_id_t const id)
+default_output::default_output(osr::ways const& w, transport_mode_id_t const id)
     : w_{w},
       profile_{id == kOdmTransportModeId || id == kRideSharingTransportModeId
                    ? osr::search_profile::kCar

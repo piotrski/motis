@@ -222,7 +222,7 @@ std::vector<meta_router::routing_result> meta_router::search_interval(
 
 std::vector<n::routing::journey> collect_odm_journeys(
     std::vector<meta_router::routing_result> const& results,
-    nigiri::transport_mode_id_t const mode) {
+    transport_mode_id_t const mode) {
   auto taxi_journeys = std::vector<n::routing::journey>{};
   for (auto const& r : results | std::views::drop(1)) {
     for (auto const& j : r.journeys_) {

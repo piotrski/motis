@@ -670,19 +670,21 @@ api::Itinerary journey_to_response(
               }
 
               auto out = std::unique_ptr<output>{};
-              if (flex::mode_id::is_flex(x.transport_mode_id_)) {
+              if (flex::mode_id::is_flex(x.transport_mode_payload_)) {
                 out = std::make_unique<flex::flex_output>(
                     *w, *l, pl, matches, ae, csr, tz_map, tags, tt, *fl,
-                    flex::mode_id{x.transport_mode_id_});
-              } else if (x.transport_mode_id_ >= kGbfsTransportModeIdOffset) {
+                    flex::mode_id{x.transport_mode_payload_});
+              } else if (x.transport_mode_payload_ >=
+                         kGbfsTransportModeIdOffset) {
                 auto const is_pre_transit = pred == nullptr;
                 out = std::make_unique<gbfs::gbfs_output>(
-                    *w, gbfs_rd, gbfs_rd.get_products_ref(x.transport_mode_id_),
+                    *w, gbfs_rd,
+                    gbfs_rd.get_products_ref(x.transport_mode_payload_),
                     is_pre_transit ? ignore_start_rental_return_constraints
                                    : ignore_dest_rental_return_constraints);
               } else {
-                out =
-                    std::make_unique<default_output>(*w, x.transport_mode_id_);
+                out = std::make_unique<default_output>(
+                    *w, x.transport_mode_payload_);
               }
 
               append(street_routing(
