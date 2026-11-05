@@ -33,7 +33,8 @@ struct way_matches_storage {
                               osr::platforms const&,
                               osr::ways const&,
                               osr::lookup const&,
-                              platform_matches_t const&);
+                              platform_matches_t const&,
+                              bool use_adjusted_positions);
 };
 
 std::optional<geo::latlng> get_platform_center(osr::platforms const&,
@@ -43,15 +44,19 @@ std::optional<geo::latlng> get_platform_center(osr::platforms const&,
 osr::platform_idx_t get_match(nigiri::timetable const&,
                               osr::platforms const&,
                               osr::ways const&,
-                              nigiri::location_idx_t);
+                              osr::lookup const&,
+                              nigiri::location_idx_t,
+                              double max_matching_distance);
 
 platform_matches_t get_matches(nigiri::timetable const&,
                                osr::platforms const&,
-                               osr::ways const&);
+                               osr::ways const&,
+                               osr::lookup const&,
+                               double max_matching_distance);
 
 std::optional<std::string_view> get_track(std::string_view);
 
-std::vector<osr::match_t> get_reverse_platform_way_matches(
+osr::match_result get_reverse_platform_way_matches(
     osr::lookup const&,
     way_matches_storage const*,
     osr::search_profile,
