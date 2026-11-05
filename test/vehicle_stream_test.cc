@@ -67,7 +67,7 @@ std::shared_ptr<fake_rt> make_rt(std::vector<fake_vehicle> vehicles) {
 
 cycle build(std::shared_ptr<void const> const& current) {
   auto const rt = std::static_pointer_cast<fake_rt const>(current);
-  auto c = cycle{.keep_alive_ = current};
+  auto c = cycle{.keep_alive_ = current, .entries_ = {}};
   for (auto i = 0U; i != rt->positions_.size(); ++i) {
     auto const& p = rt->positions_[i];
     auto const& v = rt->vehicles_[i];
@@ -157,7 +157,7 @@ TEST(motis_vehicle_stream, selects_fresh_matched_vehicles_inside_the_viewport) {
 }
 
 TEST(motis_vehicle_stream, sends_a_snapshot_then_field_deltas) {
-  auto s = connection_state{.sub_ = krakow()};
+  auto s = connection_state{.sub_ = krakow(), .sent_ = {}};
 
   auto const first = make_rt({{"a", 50.05, 19.9, kNow - 10},
                               {"b", 50.06, 19.9, kNow - 10},
@@ -196,7 +196,7 @@ TEST(motis_vehicle_stream, sends_a_snapshot_then_field_deltas) {
 }
 
 TEST(motis_vehicle_stream, applying_deltas_reproduces_the_snapshot) {
-  auto s = connection_state{.sub_ = krakow()};
+  auto s = connection_state{.sub_ = krakow(), .sent_ = {}};
   auto client = std::map<std::string, json::object>{};
   auto const apply = [&](json::object const& m) {
     if (m.at("type") == "snapshot") {
@@ -247,7 +247,7 @@ TEST(motis_vehicle_stream, applying_deltas_reproduces_the_snapshot) {
 }
 
 TEST(motis_vehicle_stream, resubscribing_sends_only_what_changed) {
-  auto s = connection_state{.sub_ = krakow("1")};
+  auto s = connection_state{.sub_ = krakow("1"), .sent_ = {}};
   auto const c = build(make_rt({{"west", 50.05, 19.85, kNow - 10},
                                 {"both", 50.05, 19.95, kNow - 10},
                                 {"east", 50.05, 20.05, kNow - 10}}));
@@ -275,7 +275,7 @@ TEST(motis_vehicle_stream, resubscribing_sends_only_what_changed) {
 }
 
 TEST(motis_vehicle_stream, refuses_oversized_viewports) {
-  auto s = connection_state{.sub_ = krakow()};
+  auto s = connection_state{.sub_ = krakow(), .sent_ = {}};
   auto const c = build(make_rt(
       {{"a", 50.05, 19.9, kNow - 10}, {"b", 50.06, 19.9, kNow - 10}}));
   auto const m = json::parse(
