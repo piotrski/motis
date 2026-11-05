@@ -9,6 +9,7 @@
 #include "osr/geojson.h"
 #include "osr/location.h"
 
+#include "motis/get_loc.h"
 #include "motis/location_routes.h"
 #include "motis/osr/parameters.h"
 
@@ -305,7 +306,8 @@ void way_matches_storage::preprocess_osr_matches(
     osr::platforms const& pl,
     osr::ways const& w,
     osr::lookup const& lookup,
-    platform_matches_t const& platform_matches) {
+    platform_matches_t const& platform_matches,
+    bool const use_adjusted_positions) {
   auto const pt = utl::get_active_progress_tracker();
   pt->in_high(tt.n_locations());
 
@@ -314,8 +316,13 @@ void way_matches_storage::preprocess_osr_matches(
       [&](int, std::size_t const idx) {
         auto const l =
             n::location_idx_t{static_cast<n::location_idx_t::value_t>(idx)};
+        // `compute_footpaths` moves the stops to their platform centers for
+        // `use_osm_stop_coordinates_`; match from that final position so the
+        // candidates are valid for the moved stops.
         return lookup.get_raw_match(
-            osr::location{tt.locations_.coordinates_[l],
+            osr::location{use_adjusted_positions
+                              ? get_adjusted_pos(tt, w, pl, platform_matches, l)
+                              : tt.locations_.coordinates_[l],
                           pl.get_level(w, platform_matches[l])},
             max_matching_distance_);
       },

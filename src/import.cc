@@ -483,19 +483,27 @@ void import(config const& c,
 
         d.load_matches();
         if (c.timetable_.value().preprocess_max_matching_distance_ > 0.0) {
+          // osr_footpath moves the stops to their platform centers afterwards:
+          // preprocess from the final positions.
+          auto const moves_stops =
+              c.osr_footpath_ && c.timetable_->use_osm_stop_coordinates_;
           progress_tracker->status("Prepare Platform Way Matches")
               .out_bounds(30, 100);
           way_matches_storage{
               data_path, cista::mmap::protection::WRITE,
               c.timetable_.value().preprocess_max_matching_distance_}
               .preprocess_osr_matches(*d.tt_, *d.pl_, *d.w_, *d.l_,
-                                      *d.matches_);
+                                      *d.matches_, moves_stops);
         }
       },
       {tt_hash, osm_hash, osr_version(), n_version(), matches_version(),
        std::pair{"way_matches",
                  cista::build_hash(c.timetable_.value_or(config::timetable{})
                                        .preprocess_max_matching_distance_)},
+       std::pair{"way_matches_final_positions",
+                 cista::build_hash(
+                     c.osr_footpath_ && c.timetable_.value_or(config::timetable{})
+                                            .use_osm_stop_coordinates_)},
        std::pair{"max_matching_distance",
                  cista::build_hash(c.timetable_.value_or(config::timetable{})
                                        .max_matching_distance_)}}};
@@ -547,7 +555,11 @@ void import(config const& c,
        osr_footpath_version(), matches_version(), n_version(),
        std::pair{"way_matches",
                  cista::build_hash(c.timetable_.value_or(config::timetable{})
-                                       .preprocess_max_matching_distance_)}}};
+                                       .preprocess_max_matching_distance_)},
+       std::pair{"way_matches_final_positions",
+                 cista::build_hash(
+                     c.osr_footpath_ && c.timetable_.value_or(config::timetable{})
+                                            .use_osm_stop_coordinates_)}}};
 
   auto route_shapes_task = task{
       "route_shapes",

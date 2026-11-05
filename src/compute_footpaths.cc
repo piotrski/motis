@@ -40,13 +40,8 @@ elevator_footpath_map_t compute_footpaths(
   auto const loc_rtree = [&]() {
     auto t = point_rtree<n::location_idx_t>{};
     for (auto i = n::location_idx_t{0U}; i != tt.n_locations(); ++i) {
-      if (update_coordinates && matches[i] != osr::platform_idx_t::invalid()) {
-        auto const center = get_platform_center(pl, w, matches[i]);
-        if (center.has_value() &&
-            geo::distance(*center, tt.locations_.coordinates_[i]) <
-                kMaxAdjust) {
-          tt.locations_.coordinates_[i] = *center;
-        }
+      if (update_coordinates) {
+        tt.locations_.coordinates_[i] = get_adjusted_pos(tt, w, pl, matches, i);
       }
       t.add(tt.locations_.coordinates_[i], i);
     }
@@ -110,13 +105,17 @@ elevator_footpath_map_t compute_footpaths(
                 n::location_idx_t{static_cast<n::location_idx_t::value_t>(x)};
             tmp.clear();
             if (is_candidate(l)) {
+              auto const loc = get_loc(tt, w, pl, matches, l);
               auto raw = std::span<osr::raw_way_candidate const>{};
-              if (use_raw_matches) {
+              // The preprocessed candidates were computed for the stop's
+              // coordinate (moved to the platform center for
+              // `use_osm_stop_coordinates_`). A snapped query position that
+              // differs from it needs a fresh match.
+              if (use_raw_matches && loc.pos_ == tt.locations_.coordinates_[l]) {
                 auto const& m = way_matches->matches_[l];
                 raw = {m.begin(), m.end()};
               }
-              lookup.match(to_profile_parameters(mode.profile_, {}),
-                           get_loc(tt, w, pl, matches, l), false,
+              lookup.match(to_profile_parameters(mode.profile_, {}), loc, false,
                            osr::direction::kForward,
                            mode.max_matching_distance_, nullptr, mode.profile_,
                            raw, tmp);

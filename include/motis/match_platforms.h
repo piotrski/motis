@@ -33,7 +33,8 @@ struct way_matches_storage {
                               osr::platforms const&,
                               osr::ways const&,
                               osr::lookup const&,
-                              platform_matches_t const&);
+                              platform_matches_t const&,
+                              bool use_adjusted_positions);
 };
 
 std::optional<geo::latlng> get_platform_center(osr::platforms const&,

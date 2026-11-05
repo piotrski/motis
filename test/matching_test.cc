@@ -101,10 +101,7 @@ TEST(motis, get_way_candidates) {
           motis::config::timetable{
               .first_day_ = "2019-05-01",
               .num_days_ = 2,
-              // stop coordinates stay as in the timetable: with OSM
-              // coordinates the stops move after the raw matches are
-              // preprocessed, so both match sets are no longer comparable
-              .use_osm_stop_coordinates_ = false,
+              .use_osm_stop_coordinates_ = true,
               .extend_missing_footpaths_ = false,
               .preprocess_max_matching_distance_ = 250,
               .datasets_ = {{"test", {.path_ = std::string{kGTFS}}}}},
