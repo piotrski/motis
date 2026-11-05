@@ -4,10 +4,23 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 
 ## Active Patches
 
+### nigiri base
+
+- `.pkg` pins `piotrski/nigiri@patches/upstream-1ccdf697` (`56b13d78`): upstream nigiri `1ccdf697` (#452, the same commit upstream MOTIS `4e2b1676a` uses) with the fork's GTFS-RT patches below rebased on top, plus `56b13d78`, which ports the fork's rt tests to `loader::load` after #450. The old pin was `fix/gtfsrt-adjacent-service-day` at `86e872d6`.
+- Picked up with this base: update_lbs perf (`aadccd05`, #445), the bitfield copy fix (`e07e3bea`), compact timetable storage (#449 `8ab457b2`, #450 `012e623b`, #451 `49cdab21`), one trip id per trip (#452), route flags, `transport_mode_t` offsets, reflexive transfer times, and RT changes #419, #439 and #441.
+- `nigiri_bin_ver` goes from 33 to 37, so every deployment needs a full re-import.
+- Behavior changes picked up:
+  - Wheelchair routing only uses trips whose GTFS `trips.txt` has `wheelchair_accessible=1` (nigiri `e17774c`). Feeds without that column get no wheelchair transit routes.
+  - The first and last walk legs are shifted so they arrive exactly at departure (or leave at arrival), so an itinerary can start later than the query time. `journey_to_response` computes `duration` from the first and last leg times (ported from upstream MOTIS #1516).
+- Not ported from upstream MOTIS: the #1593 offset redesign (the fork only aliases `transport_mode_id_t` to nigiri's `transport_mode_t::payload_t`) and #1616.
+- Tests to run:
+  - `nigiri-test` (full)
+  - `motis-test` (full; compare against the known failures)
+
 ### GTFS-RT adjacent service-day resolution
 
 - Status: still required
-- Source: `piotrski/nigiri@fix/gtfsrt-adjacent-service-day`
+- Source: `piotrski/nigiri@fix/gtfsrt-adjacent-service-day`, rebased onto `patches/upstream-1ccdf697`, which `.pkg` pins
 - Purpose: resolve trip descriptors without `start_date` against a unique adjacent service day so after-midnight trips keep realtime data; reject ambiguous matches
 - Tests to run:
   - `nigiri-test --gtest_filter='rt.gtfsrt_resolve_static_trip:rt.gtfsrt_resolve_adjacent_service_day'`
@@ -15,8 +28,8 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 
 ### GTFS-RT block trip terminal departure
 
-- Status: still required. Drop it once the fork is rebased onto upstream nigiri at or after `18bf63c` (#419), which contains the same guard and `pred` initialisation; keep the order-independence tests passing when doing so.
-- Source: `piotrski/nigiri@fix/gtfsrt-block-terminal-departure` (on top of the adjacent service-day patch; `.pkg` pins `branch=fix/gtfsrt-adjacent-service-day`, which is fast-forwarded to the pinned commit)
+- Status: still required, reduced. Since the base includes upstream `18bf63c` (#419) with the same guard and `pred` initialisation, the patch is only `9f914290` (propagate the outgoing trip's own delay after a held departure) plus its tests. Drop it if upstream adopts the same rule; keep the order-independence tests passing.
+- Source: `piotrski/nigiri@fix/gtfsrt-block-terminal-departure` (on top of the adjacent service-day patch; rebased onto `patches/upstream-1ccdf697`, which `.pkg` pins)
 - Purpose: trips of a GTFS block share the terminal stop; an incoming trip's arrival delay must not overwrite the next trip's departure there (Kraków line 70 at Pleszów showed 21:34 for a 21:39 departure). A late arrival still holds the departure, but only the outgoing trip's own delay propagates along that trip, independent of the order of the trips' updates. A later update that starts after a trip's first stop keeps that stop's existing prediction (backport of the #419 `pred` initialisation).
 - Tests to run:
   - `nigiri-test --gtest_filter='rt.block_terminal*:join_split.*'`
@@ -25,7 +38,7 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 ### GTFS-RT version-switch twin trips
 
 - Status: still required while ZTP Kraków feed A labels post-midnight trips with the next timetable version's trip_id on version-switch nights. Not upstream.
-- Source: `piotrski/nigiri@fix/gtfsrt-version-switch-twin` (on top of the block terminal patch; `.pkg` pins `branch=fix/gtfsrt-adjacent-service-day`, which is fast-forwarded to the pinned commit)
+- Source: `piotrski/nigiri@fix/gtfsrt-version-switch-twin` (on top of the block terminal patch; rebased onto `patches/upstream-1ccdf697`, which `.pkg` pins)
 - Purpose: for a TripUpdate without `start_date`, compare each realtime time with the scheduled time of its own stop (matched by stop_sequence first, then stop_id; skipped stops only advance the match; a stop_id match is not used when the stop_sequence names a later visit of a loop stop). If every time is 12 h or more off and a whole number of days off (within 3 h), use the same trip on the service day the realtime implies, or a twin trip (same route, direction, stops, relative scheduled times and local departure time) on that day, with stop_sequence values translated to the twin's numbering; if no such run exists, drop the update. Vehicles that are just very late or early keep their run. Without it, Kraków buses showed "−23 h 59 min" on 2026-11-03 00:00–04:00 and the running trips had no realtime.
 - Tests to run:
   - `nigiri-test --gtest_filter='rt.gtfsrt_version_switch_twin'`
