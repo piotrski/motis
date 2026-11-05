@@ -31,13 +31,12 @@ elevator_footpath_map_t compute_footpaths(
     osr::lookup const& lookup,
     osr::platforms const& pl,
     nigiri::timetable& tt,
+    platform_matches_t const& matches,
+    way_matches_storage const* way_matches,
     osr::elevation_storage const* elevations,
     bool const update_coordinates,
     std::vector<routed_transfers_settings> const& settings) {
-  fmt::println(std::clog, "creating matches");
-  auto const matches = get_matches(tt, pl, w);
-
-  fmt::println(std::clog, "  -> creating r-tree");
+  fmt::println(std::clog, "creating r-tree");
   auto const loc_rtree = [&]() {
     auto t = point_rtree<n::location_idx_t>{};
     for (auto i = n::location_idx_t{0U}; i != tt.n_locations(); ++i) {
@@ -92,24 +91,46 @@ elevator_footpath_map_t compute_footpaths(
       return !mode.is_candidate_ || mode.is_candidate_(l);
     };
 
+    // The preprocessed candidates are geometric and capped at the
+    // preprocessing radius, so they are only usable when that radius covers
+    // this profile's matching distance.
+    auto const use_raw_matches =
+        way_matches != nullptr && !way_matches->matches_.empty() &&
+        way_matches->max_matching_distance_ >= mode.max_matching_distance_;
+
     {
       auto const timer = utl::scoped_timer{
           fmt::format("matching timetable locations for profile={}",
                       to_str(mode.profile_))};
 
-      utl::parallel_for_run(tt.n_locations(), [&](std::size_t const x) {
-        pt->update_monotonic(n_done + x);
-
-        auto const l =
-            n::location_idx_t{static_cast<n::location_idx_t::value_t>(x)};
-        if (!is_candidate(l)) {
-          return;
-        }
-        candidates[l] = lookup.match(
-            to_profile_parameters(mode.profile_, {}),
-            get_loc(tt, w, pl, matches, l), false, osr::direction::kForward,
-            mode.max_matching_distance_, nullptr, mode.profile_);
-      });
+      candidates.clear();
+      utl::parallel_ordered_collect_threadlocal<osr::match_result>(
+          tt.n_locations(),
+          [&](osr::match_result& tmp, std::size_t const x) {
+            auto const l =
+                n::location_idx_t{static_cast<n::location_idx_t::value_t>(x)};
+            tmp.clear();
+            if (is_candidate(l)) {
+              auto raw = std::span<osr::raw_way_candidate const>{};
+              if (use_raw_matches) {
+                auto const& m = way_matches->matches_[l];
+                raw = {m.begin(), m.end()};
+              }
+              lookup.match(to_profile_parameters(mode.profile_, {}),
+                           get_loc(tt, w, pl, matches, l), false,
+                           osr::direction::kForward,
+                           mode.max_matching_distance_, nullptr, mode.profile_,
+                           raw, tmp);
+            } else {
+              tmp.start(osr::kNoLevel);
+              tmp.finish();
+            }
+            return tmp;
+          },
+          [&](std::size_t, osr::match_result&& m) {
+            candidates.append(m, osr::match_idx_t{0U});
+          },
+          pt->update_fn());
 
       n_done += tt.n_locations();
     }
