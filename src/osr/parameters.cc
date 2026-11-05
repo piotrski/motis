@@ -11,6 +11,7 @@
 #include "osr/routing/profiles/car_parking.h"
 #include "osr/routing/profiles/car_sharing.h"
 #include "osr/routing/profiles/foot.h"
+#include "osr/routing/profiles/hgv.h"
 
 namespace motis {
 
@@ -152,6 +153,7 @@ osr::profile_parameters to_profile_parameters(osr::search_profile const p,
                        osr::kElevationHighCost>::parameters{
           .speed_meters_per_second_ = params.cycling_speed_};
     case osr::search_profile::kCar: return osr::car::parameters{};
+    case osr::search_profile::kHgv: return osr::hgv::parameters{};
     case osr::search_profile::kCarDropOff:
       return osr::car_parking<false, false>::parameters{
           .car_ = {},

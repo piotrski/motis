@@ -1,5 +1,6 @@
 #include "motis/gbfs/osr_mapping.h"
 
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -29,13 +30,8 @@
 namespace motis::gbfs {
 
 struct node_match {
-  osr::way_candidate const& way() const { return wc_; }
-  osr::node_candidate const& node() const {
-    return left_ ? wc_.left_ : wc_.right_;
-  }
-
-  osr::way_candidate wc_;
-  bool left_{};
+  osr::way_idx_t way_{osr::way_idx_t::invalid()};
+  osr::candidate_node node_{};
 };
 
 struct osr_mapping {
@@ -168,51 +164,63 @@ struct osr_mapping {
     static constexpr auto foot_params = osr::bike_sharing::footp::parameters{};
     static constexpr auto bike_params = osr::bike_sharing::bikep::parameters{};
 
-    auto is_acceptable_node = [&](osr::node_candidate const& n) {
+    auto is_acceptable_node = [&](osr::candidate_node const& n) {
       if (!n.valid() || n.dist_to_node_ > kMaxGbfsMatchingDistance) {
         return false;
       }
       auto const& node_props = w_.r_->node_properties_[n.node_];
-      if (footp::node_cost(foot_params, node_props) == osr::kInfeasible ||
-          bikep::node_cost(bike_params, node_props) == osr::kInfeasible) {
+      if (footp::node_cost(foot_params, node_props).cost_ == osr::kInfeasible ||
+          bikep::node_cost(bike_params, node_props).cost_ == osr::kInfeasible) {
         return false;
       }
       // node needs to have at least one way accessible by foot and one by bike
+      auto const way_accessible = [&]<typename P>(P::parameters const& params,
+                                                  auto const way_idx) {
+        return P::way_cost(params, *w_.r_, w_.timezones_, way_idx,
+                           w_.r_->way_properties_[way_idx],
+                           osr::direction::kForward, 0U, std::nullopt,
+                           osr::duration_t{0U}, osr::direction::kForward)
+                   .cost_ != osr::kInfeasible;
+      };
       return utl::any_of(w_.r_->node_ways_[n.node_],
                          [&](auto const way_idx) {
-                           return footp::way_cost(
-                                      footp::parameters{},
-                                      w_.r_->way_properties_[way_idx],
-                                      osr::direction::kForward,
-                                      0U) != osr::kInfeasible;
+                           return way_accessible.template operator()<footp>(
+                               foot_params, way_idx);
                          }) &&
              utl::any_of(w_.r_->node_ways_[n.node_], [&](auto const way_idx) {
-               return bikep::way_cost(
-                          bikep::parameters{}, w_.r_->way_properties_[way_idx],
-                          osr::direction::kForward, 0U) != osr::kInfeasible;
+               return way_accessible.template operator()<bikep>(bike_params,
+                                                                way_idx);
              });
     };
 
-    auto const matches = l_.match<footp>(footp::parameters{}, loc, false,
-                                         osr::direction::kForward,
-                                         kMaxGbfsMatchingDistance, nullptr);
+    auto matches = osr::match_result{};
+    l_.match<footp>(footp::parameters{}, loc, false, osr::direction::kForward,
+                    kMaxGbfsMatchingDistance, nullptr, matches);
+    auto const m = matches[osr::match_idx_t{0U}];
     auto node_matches = std::vector<node_match>{};
-    for (auto const& m : matches) {
-      if (is_acceptable_node(m.left_)) {
-        node_matches.emplace_back(node_match{m, true});
-      }
-      if (is_acceptable_node(m.right_)) {
-        node_matches.emplace_back(node_match{m, false});
+    for (auto j = std::size_t{0U}; j != m.size(); ++j) {
+      for (auto const& nc : {m.left(j), m.right(j)}) {
+        if (is_acceptable_node(nc)) {
+          node_matches.emplace_back(node_match{m.way_[j], nc});
+        }
       }
     }
     utl::sort(node_matches, [](auto const& a, auto const& b) {
-      return a.node().dist_to_node_ < b.node().dist_to_node_;
+      return a.node_.dist_to_node_ < b.node_.dist_to_node_;
     });
 
-    auto connected_components = hash_set<osr::component_idx_t>{};
+    // Keep only the closest node per component. Single-way components have no
+    // id; the way itself identifies them.
+    auto const& components =
+        w_.r_->get_class_components(osr::component_class::kFoot);
+    auto seen_components = hash_set<std::uint32_t>{};
+    auto seen_ways = hash_set<osr::way_idx_t>{};
     for (auto it = node_matches.begin(); it != node_matches.end();) {
-      auto const component = w_.r_->way_component_[it->way().way_];
-      if (!connected_components.insert(component).second) {
+      auto const component = components.get(it->way_);
+      auto const is_new = component.has_value()
+                              ? seen_components.insert(*component).second
+                              : seen_ways.insert(it->way_).second;
+      if (!is_new) {
         it = node_matches.erase(it);
       } else {
         ++it;
@@ -282,7 +290,7 @@ struct osr_mapping {
           }
         }
         for (auto const& m : matches) {
-          auto const& node = m.node();
+          auto const& node = m.node_;
           auto const edge_to_an = osr::additional_edge{
               additional_node_id,
               static_cast<osr::distance_t>(node.dist_to_node_)};
@@ -329,7 +337,7 @@ struct osr_mapping {
         rd.start_allowed_.set(additional_node_id, true);
 
         for (auto const& m : matches) {
-          auto const& nc = m.node();
+          auto const& nc = m.node_;
           auto const edge_to_an = osr::additional_edge{
               additional_node_id,
               static_cast<osr::distance_t>(nc.dist_to_node_)};

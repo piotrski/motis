@@ -10,6 +10,7 @@
 #include "motis/fwd.h"
 #include "motis/match_platforms.h"
 #include "motis/osr/parameters.h"
+#include "motis/transport_mode_ids.h"
 #include "motis/types.h"
 
 namespace motis {
@@ -40,7 +41,7 @@ struct output {
 
 struct default_output final : public output {
   default_output(osr::ways const&, osr::search_profile);
-  default_output(osr::ways const&, nigiri::transport_mode_id_t);
+  default_output(osr::ways const&, transport_mode_id_t);
   ~default_output() override;
 
   bool is_time_dependent() const override;
@@ -58,7 +59,7 @@ struct default_output final : public output {
 
   osr::ways const& w_;
   osr::search_profile profile_;
-  nigiri::transport_mode_id_t id_;
+  transport_mode_id_t id_;
 };
 
 using street_routing_cache_key_t = std::

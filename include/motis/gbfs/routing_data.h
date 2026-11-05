@@ -5,6 +5,7 @@
 
 #include "motis/fwd.h"
 #include "motis/gbfs/data.h"
+#include "motis/transport_mode_ids.h"
 #include "motis/types.h"
 
 namespace motis::gbfs {
@@ -27,8 +28,8 @@ struct gbfs_routing_data {
 
   provider_products const& get_products(gbfs_products_ref);
 
-  nigiri::transport_mode_id_t get_transport_mode(gbfs_products_ref);
-  gbfs_products_ref get_products_ref(nigiri::transport_mode_id_t) const;
+  transport_mode_id_t get_transport_mode(gbfs_products_ref);
+  gbfs_products_ref get_products_ref(transport_mode_id_t) const;
 
   osr::ways const* w_{};
   osr::lookup const* l_{};
@@ -36,7 +37,7 @@ struct gbfs_routing_data {
 
   hash_map<gbfs_products_ref, std::shared_ptr<products_routing_data>> products_;
   std::vector<gbfs_products_ref> products_refs_;
-  hash_map<gbfs_products_ref, nigiri::transport_mode_id_t>
+  hash_map<gbfs_products_ref, transport_mode_id_t>
       products_ref_to_transport_mode_;
 };
 

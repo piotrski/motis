@@ -49,6 +49,7 @@ api::ModeEnum to_mode(osr::search_profile const m) {
     case osr::search_profile::kCarDropOff: return api::ModeEnum::CAR_DROPOFF;
     case osr::search_profile::kFoot: [[fallthrough]];
     case osr::search_profile::kWheelchair: return api::ModeEnum::WALK;
+    case osr::search_profile::kHgv: [[fallthrough]];
     case osr::search_profile::kCar: return api::ModeEnum::CAR;
     case osr::search_profile::kBikeElevationLow: [[fallthrough]];
     case osr::search_profile::kBikeElevationHigh: [[fallthrough]];
@@ -194,12 +195,9 @@ std::optional<std::vector<api::Alert>> get_alerts(
          return std::optional{rs.first.get_location_idx()};
        }).value_or(n::location_idx_t::invalid());
   auto alerts = std::vector<api::Alert>{};
-  for (auto const& t : tt.trip_ids_[x]) {
-    auto const src = tt.trip_id_src_[t];
-    for (auto const& a :
-         rtt->alerts_.get_alerts(tt, src, x, fr.rt_, l, fuzzy_stop)) {
-      alerts.emplace_back(to_alert(a));
-    }
+  for (auto const& a : rtt->alerts_.get_alerts(tt, tt.trip_id_src_[x], x,
+                                               fr.rt_, l, fuzzy_stop)) {
+    alerts.emplace_back(to_alert(a));
   }
 
   return alerts.empty() ? std::nullopt : std::optional{std::move(alerts)};
@@ -345,7 +343,8 @@ api::Itinerary journey_to_response(
   };
 
   auto itinerary = api::Itinerary{
-      .duration_ = to_seconds(j.arrival_time() - j.departure_time()),
+      .duration_ =
+          to_seconds(j.legs_.back().arr_time_ - j.legs_.front().dep_time_),
       .startTime_ = j.legs_.front().dep_time_,
       .endTime_ = j.legs_.back().arr_time_,
       .transfers_ = std::max(
@@ -466,8 +465,7 @@ api::Itinerary journey_to_response(
                   }
                   auto const trip =
                       enter_stop.get_trip_idx(n::event_type::kDep);
-                  auto const id_idx = tt.trip_ids_[trip].front();
-                  return tt.trip_id_src_[id_idx];
+                  return tt.trip_id_src_[trip];
                 }();
                 auto const [service_day, _] =
                     enter_stop.get_trip_start(n::event_type::kDep);
@@ -568,8 +566,8 @@ api::Itinerary journey_to_response(
                          tt.src_end_date_[src] < service_day)
                             ? std::optional{tt.src_end_date_[src]}
                             : std::nullopt,
-                    .bikesAllowed_ =
-                        enter_stop.bikes_allowed(nigiri::event_type::kDep)});
+                    .bikesAllowed_ = enter_stop.is_flag_set(
+                        nigiri::kBikesAllowed, nigiri::event_type::kDep)});
 
                 auto const attributes =
                     tt.attribute_combinations_[enter_stop
@@ -673,19 +671,21 @@ api::Itinerary journey_to_response(
               }
 
               auto out = std::unique_ptr<output>{};
-              if (flex::mode_id::is_flex(x.transport_mode_id_)) {
+              if (flex::mode_id::is_flex(x.transport_mode_payload_)) {
                 out = std::make_unique<flex::flex_output>(
                     *w, *l, pl, matches, ae, csr, tz_map, tags, tt, *fl,
-                    flex::mode_id{x.transport_mode_id_});
-              } else if (x.transport_mode_id_ >= kGbfsTransportModeIdOffset) {
+                    flex::mode_id{x.transport_mode_payload_});
+              } else if (x.transport_mode_payload_ >=
+                         kGbfsTransportModeIdOffset) {
                 auto const is_pre_transit = pred == nullptr;
                 out = std::make_unique<gbfs::gbfs_output>(
-                    *w, gbfs_rd, gbfs_rd.get_products_ref(x.transport_mode_id_),
+                    *w, gbfs_rd,
+                    gbfs_rd.get_products_ref(x.transport_mode_payload_),
                     is_pre_transit ? ignore_start_rental_return_constraints
                                    : ignore_dest_rental_return_constraints);
               } else {
-                out =
-                    std::make_unique<default_output>(*w, x.transport_mode_id_);
+                out = std::make_unique<default_output>(
+                    *w, x.transport_mode_payload_);
               }
 
               append(street_routing(

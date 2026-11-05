@@ -33,16 +33,16 @@ void direct_filter(std::vector<api::Itinerary> const& direct,
 
     auto const longer_than_direct = [&](n::routing::offset const& o) {
       return std::optional{o.duration_ >=
-                           get_direct_duration(o.transport_mode_id_)};
+                           get_direct_duration(o.transport_mode_payload_)};
     };
 
     return first_leg_offset.and_then(longer_than_direct).value_or(false) ||
            last_leg_offset.and_then(longer_than_direct).value_or(false) ||
            (first_leg_offset && last_leg_offset &&
-            first_leg_offset->transport_mode_id_ ==
-                last_leg_offset->transport_mode_id_ &&
+            first_leg_offset->transport_mode_payload_ ==
+                last_leg_offset->transport_mode_payload_ &&
             first_leg_offset->duration_ + last_leg_offset->duration_ >=
-                get_direct_duration(first_leg_offset->transport_mode_id_));
+                get_direct_duration(first_leg_offset->transport_mode_payload_));
   };
 
   utl::erase_if(journeys, not_better_than_direct);

@@ -26,8 +26,7 @@ struct csv_journey {
       last_mile_duration_;
 };
 
-std::optional<nigiri::transport_mode_id_t> read_transport_mode(
-    std::string_view m) {
+std::optional<transport_mode_id_t> read_transport_mode(std::string_view m) {
   if (m == "taxi") {
     return kOdmTransportModeId;
   } else if (m == "walk") {
@@ -41,9 +40,9 @@ nigiri::routing::journey make_dummy(
     nigiri::unixtime_t const departure,
     nigiri::unixtime_t const arrival,
     std::uint8_t const transfers,
-    nigiri::transport_mode_id_t const first_mile_mode,
+    transport_mode_id_t const first_mile_mode,
     nigiri::duration_t const first_mile_duration,
-    nigiri::transport_mode_id_t const last_mile_mode,
+    transport_mode_id_t const last_mile_mode,
     nigiri::duration_t const last_mile_duration) {
   return nigiri::routing::journey{
       .legs_ = {{nigiri::direction::kForward, nigiri::location_idx_t::invalid(),
@@ -119,7 +118,7 @@ nigiri::pareto_set<nigiri::routing::journey> separate_pt(
 }
 
 std::string to_csv(nigiri::routing::journey const& j) {
-  auto const mode_str = [&](nigiri::transport_mode_id_t const mode) {
+  auto const mode_str = [&](transport_mode_id_t const mode) {
     return mode == kOdmTransportModeId ? "taxi" : "walk";
   };
 
@@ -127,7 +126,7 @@ std::string to_csv(nigiri::routing::journey const& j) {
       !j.legs_.empty() && std::holds_alternative<nigiri::routing::offset>(
                               j.legs_.front().uses_)
           ? mode_str(std::get<nigiri::routing::offset>(j.legs_.front().uses_)
-                         .transport_mode_id_)
+                         .transport_mode_payload_)
           : "walk";
 
   auto const first_mile_duration =
@@ -142,7 +141,7 @@ std::string to_csv(nigiri::routing::journey const& j) {
       j.legs_.size() > 1 && std::holds_alternative<nigiri::routing::offset>(
                                 j.legs_.back().uses_)
           ? mode_str(std::get<nigiri::routing::offset>(j.legs_.back().uses_)
-                         .transport_mode_id_)
+                         .transport_mode_payload_)
           : "walk";
 
   auto const last_mile_duration =

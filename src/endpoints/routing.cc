@@ -143,8 +143,8 @@ n::routing::td_offsets_t get_td_offsets(
                         return n::routing::td_offset{
                             .valid_from_ = fp.valid_from_,
                             .duration_ = fp.duration_,
-                            .transport_mode_id_ =
-                                static_cast<n::transport_mode_id_t>(profile)};
+                            .transport_mode_payload_ =
+                                static_cast<transport_mode_id_t>(profile)};
                       }));
         });
   }
@@ -258,15 +258,17 @@ std::vector<n::routing::offset> get_offsets(
     auto const route = [&](osr::search_profile const p,
                            osr::sharing_data const* sharing) {
       auto const params = to_profile_parameters(p, osr_params);
-      auto const pos_match = r.l_->match(params, pos, false, dir,
-                                         max_matching_distance, nullptr, p);
+      auto pos_match = osr::match_result{};
+      r.l_->match(params, pos, false, dir, max_matching_distance, nullptr, p,
+                  {}, pos_match);
       auto const near_stop_matches = get_reverse_platform_way_matches(
           *r.l_, r.way_matches_, p, near_stops, near_stop_locations, dir,
           max_matching_distance);
-      return osr::route(params, *r.w_, *r.l_, p, pos, near_stop_locations,
-                        pos_match, near_stop_matches,
-                        static_cast<osr::cost_t>(max.count()), dir, nullptr,
-                        sharing, elevations);
+      return osr::route_one_to_many(
+                 params, *r.w_, *r.l_, p, pos, near_stop_locations,
+                 pos_match[osr::match_idx_t{0U}], near_stop_matches, max, dir,
+                 nullptr, sharing, elevations)
+          ->results();
     };
 
     if (osr::is_rental_profile(profile)) {
@@ -315,7 +317,7 @@ std::vector<n::routing::offset> get_offsets(
             if (p.has_value()) {
               offsets.emplace_back(l,
                                    n::duration_t{static_cast<unsigned>(
-                                       std::ceil(p->cost_ / 60.0))},
+                                       std::ceil(p->duration_.count() / 60.0))},
                                    gbfs_rd.get_transport_mode(prod_ref));
             }
           }
@@ -330,10 +332,10 @@ std::vector<n::routing::offset> get_offsets(
       auto const paths = route(profile, nullptr);
       for (auto const [p, l] : utl::zip(paths, near_stops)) {
         if (p.has_value()) {
-          offsets.emplace_back(
-              l,
-              n::duration_t{static_cast<unsigned>(std::ceil(p->cost_ / 60.0))},
-              static_cast<n::transport_mode_id_t>(profile));
+          offsets.emplace_back(l,
+                               n::duration_t{static_cast<unsigned>(
+                                   std::ceil(p->duration_.count() / 60.0))},
+                               static_cast<transport_mode_id_t>(profile));
         }
       }
     }
