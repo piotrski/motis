@@ -753,9 +753,9 @@ ICE,DB,ICE,,,101
 S3,DB,S3,,,109
 
 # trips.txt
-route_id,service_id,trip_id,trip_headsign,block_id
-ICE,S1,ICE,,
-S3,S1,S3,,
+route_id,service_id,trip_id,trip_headsign,block_id,wheelchair_accessible
+ICE,S1,ICE,,,1
+S3,S1,S3,,,1
 
 # stop_times.txt
 trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type
