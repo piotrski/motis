@@ -195,12 +195,9 @@ std::optional<std::vector<api::Alert>> get_alerts(
          return std::optional{rs.first.get_location_idx()};
        }).value_or(n::location_idx_t::invalid());
   auto alerts = std::vector<api::Alert>{};
-  for (auto const& t : tt.trip_ids_[x]) {
-    auto const src = tt.trip_id_src_[t];
-    for (auto const& a :
-         rtt->alerts_.get_alerts(tt, src, x, fr.rt_, l, fuzzy_stop)) {
-      alerts.emplace_back(to_alert(a));
-    }
+  for (auto const& a : rtt->alerts_.get_alerts(tt, tt.trip_id_src_[x], x,
+                                               fr.rt_, l, fuzzy_stop)) {
+    alerts.emplace_back(to_alert(a));
   }
 
   return alerts.empty() ? std::nullopt : std::optional{std::move(alerts)};
@@ -467,8 +464,7 @@ api::Itinerary journey_to_response(
                   }
                   auto const trip =
                       enter_stop.get_trip_idx(n::event_type::kDep);
-                  auto const id_idx = tt.trip_ids_[trip].front();
-                  return tt.trip_id_src_[id_idx];
+                  return tt.trip_id_src_[trip];
                 }();
                 auto const [service_day, _] =
                     enter_stop.get_trip_start(n::event_type::kDep);
