@@ -110,7 +110,7 @@ struct task {
     run_();
     write_hashes(data_path, name_, hashes_);
     pt->out_ = 100;
-    pt->status("FINISHED");
+    pt->status(utl::progress_tracker::kFinished);
     done_ = true;
   }
 
