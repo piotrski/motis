@@ -64,13 +64,13 @@ api::oneToMany_response one_to_many_direct(
   auto const profile = to_profile(mode, pedestrian_profile, elevation_costs);
   auto const paths =
       osr::route(to_profile_parameters(profile, params), w, l, profile, one,
-                 many, max_direct_time, dir, max_matching_distance, nullptr,
+                 many, std::chrono::seconds{static_cast<std::chrono::seconds::rep>(max_direct_time)}, dir, max_matching_distance, nullptr,
                  nullptr, elevations_, [&](auto&&) { return with_distance; });
 
   return utl::to_vec(paths, [&](std::optional<osr::path> const& p) {
     return p
         .transform([&](osr::path const& x) {
-          return api::Duration{.duration_ = x.cost_,
+          return api::Duration{.duration_ = x.duration_.count(),
                                .distance_ = with_distance
                                                 ? std::optional{x.dist_}
                                                 : std::nullopt};

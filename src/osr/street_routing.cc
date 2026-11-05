@@ -56,6 +56,7 @@ api::ModeEnum default_output::get_mode() const {
     case osr::search_profile::kBikeFast: [[fallthrough]];
     case osr::search_profile::kBikeElevationLow: [[fallthrough]];
     case osr::search_profile::kBikeElevationHigh: return api::ModeEnum::BIKE;
+    case osr::search_profile::kHgv: [[fallthrough]];
     case osr::search_profile::kCar: return api::ModeEnum::CAR;
     case osr::search_profile::kCarParking: [[fallthrough]];
     case osr::search_profile::kCarParkingWheelchair:
@@ -240,7 +241,7 @@ api::Itinerary street_routing(osr::ways const& w,
     auto const profile = out.get_profile();
     return osr::route(
         to_profile_parameters(profile, osr_params), w, l, profile, from, to,
-        static_cast<osr::cost_t>(max.count()), osr::direction::kForward,
+        max, osr::direction::kForward,
         max_matching_distance,
         s ? &set_blocked(e_nodes, e_states, blocked_mem) : nullptr,
         out.get_sharing_data(), elevations, osr::routing_algorithm::kAStarBi);
@@ -255,16 +256,16 @@ api::Itinerary street_routing(osr::ways const& w,
   }
 
   auto const deduced_start_time =
-      start_time ? *start_time : *end_time - std::chrono::seconds{path->cost_};
+      start_time ? *start_time : *end_time - std::chrono::seconds{path->duration_.count()};
   auto itinerary = api::Itinerary{
       .duration_ = start_time && end_time
                        ? std::chrono::duration_cast<std::chrono::seconds>(
                              *end_time - *start_time)
                              .count()
-                       : path->cost_,
+                       : path->duration_.count(),
       .startTime_ = deduced_start_time,
       .endTime_ = end_time ? *end_time
-                           : *start_time + std::chrono::seconds{path->cost_},
+                           : *start_time + std::chrono::seconds{path->duration_.count()},
       .transfers_ = 0};
 
   auto t =
@@ -288,7 +289,7 @@ api::Itinerary street_routing(osr::ways const& w,
         for (auto const& p : range) {
           utl::concat(concat, p.polyline_);
           if (p.cost_ != osr::kInfeasible) {
-            t += std::chrono::seconds{p.cost_};
+            t += std::chrono::seconds{p.duration_.count()};
             dist += p.dist_;
           }
         }
