@@ -4,6 +4,8 @@
 
 #include "nigiri/types.h"
 
+#include "motis/transport_mode_ids.h"
+
 namespace motis::flex {
 
 struct mode_id {
@@ -15,11 +17,11 @@ struct mode_id {
         stop_idx_{stop_idx},
         msb_{1U} {}
 
-  static bool is_flex(nigiri::transport_mode_id_t const x) {
+  static bool is_flex(transport_mode_id_t const x) {
     return (x & 0x80'00'00'00) == 0x80'00'00'00;
   }
 
-  explicit mode_id(nigiri::transport_mode_id_t const x) {
+  explicit mode_id(transport_mode_id_t const x) {
     std::memcpy(this, &x, sizeof(mode_id));
   }
 
@@ -35,9 +37,9 @@ struct mode_id {
     return nigiri::flex_transport_idx_t{transport_};
   }
 
-  nigiri::transport_mode_id_t to_id() const {
-    static_assert(sizeof(mode_id) == sizeof(nigiri::transport_mode_id_t));
-    auto id = nigiri::transport_mode_id_t{};
+  transport_mode_id_t to_id() const {
+    static_assert(sizeof(mode_id) == sizeof(transport_mode_id_t));
+    auto id = transport_mode_id_t{};
     std::memcpy(&id, this, sizeof(id));
     return id;
   }

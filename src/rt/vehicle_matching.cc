@@ -68,15 +68,13 @@ std::optional<n::trip_idx_t> find_static_trip(n::timetable const& tt,
                                               std::string_view const trip_id) {
   auto const it = std::lower_bound(
       begin(tt.trip_id_to_idx_), end(tt.trip_id_to_idx_), trip_id,
-      [&](n::pair<n::trip_id_idx_t, n::trip_idx_t> const& entry,
-          std::string_view const id) {
-        return std::tuple{tt.trip_id_src_[entry.first],
-                          tt.trip_id_strings_[entry.first].view()} <
+      [&](n::trip_idx_t const t, std::string_view const id) {
+        return std::tuple{tt.trip_id_src_[t], tt.trip_id_strings_[t].view()} <
                std::tuple{src, id};
       });
-  if (it != end(tt.trip_id_to_idx_) && tt.trip_id_src_[it->first] == src &&
-      tt.trip_id_strings_[it->first].view() == trip_id) {
-    return it->second;
+  if (it != end(tt.trip_id_to_idx_) && tt.trip_id_src_[*it] == src &&
+      tt.trip_id_strings_[*it].view() == trip_id) {
+    return *it;
   }
   return std::nullopt;
 }
@@ -505,20 +503,12 @@ bool can_match_target_trip(tag_lookup const& tags,
   if (source == n::source_idx_t::invalid()) {
     return false;
   }
-  auto const target_ids =
-      tt.trip_ids_[target[0].get_trip_idx(n::event_type::kDep)];
-  auto const source_matches = std::ranges::any_of(
-      target_ids, [&](n::trip_id_idx_t const id) {
-        return tt.trip_id_src_[id] == source;
-      });
-  if (!source_matches) {
+  auto const target_trip = target[0].get_trip_idx(n::event_type::kDep);
+  if (tt.trip_id_src_[target_trip] != source) {
     return false;
   }
   if (vehicle.trip_.trip_id_.has_value()) {
-    return std::ranges::any_of(target_ids, [&](n::trip_id_idx_t const id) {
-      return tt.trip_id_src_[id] == source &&
-             tt.trip_id_strings_[id].view() == *vehicle.trip_.trip_id_;
-    });
+    return tt.trip_id_strings_[target_trip].view() == *vehicle.trip_.trip_id_;
   }
   return route_matches(tags, tt, vehicle, target_route);
 }

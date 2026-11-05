@@ -16,13 +16,12 @@ bool by_stop(nr::start const& a, nr::start const& b) {
          std::tie(b.stop_, b.time_at_start_, b.time_at_stop_);
 }
 
-bool is_odm_leg(nr::journey::leg const& l,
-                nigiri::transport_mode_id_t const mode) {
+bool is_odm_leg(nr::journey::leg const& l, transport_mode_id_t const mode) {
   return std::holds_alternative<nr::offset>(l.uses_) &&
-         std::get<nr::offset>(l.uses_).transport_mode_id_ == mode;
+         std::get<nr::offset>(l.uses_).transport_mode_payload_ == mode;
 }
 
-bool uses_odm(nr::journey const& j, nigiri::transport_mode_id_t const mode) {
+bool uses_odm(nr::journey const& j, transport_mode_id_t const mode) {
   return utl::any_of(j.legs_,
                      [&](auto const& l) { return is_odm_leg(l, mode); });
 }

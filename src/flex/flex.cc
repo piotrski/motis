@@ -356,12 +356,19 @@ void add_flex_td_offsets(osr::ways const& w,
 
             auto& offsets = ret[l];
             if (offsets.empty()) {
-              offsets.emplace_back(n::unixtime_t{n::i32_minutes{0U}},
-                                   n::footpath::kMaxDuration, id.to_id());
+              offsets.push_back(n::routing::td_offset{
+                  .valid_from_ = n::unixtime_t{n::i32_minutes{0U}},
+                  .duration_ = n::footpath::kMaxDuration,
+                  .transport_mode_payload_ = id.to_id()});
             }
-            offsets.emplace_back(iv_at_from_stop.from_, duration, id.to_id());
-            offsets.emplace_back(iv_at_from_stop.to_, n::footpath::kMaxDuration,
-                                 id.to_id());
+            offsets.push_back(
+                n::routing::td_offset{.valid_from_ = iv_at_from_stop.from_,
+                                      .duration_ = duration,
+                                      .transport_mode_payload_ = id.to_id()});
+            offsets.push_back(
+                n::routing::td_offset{.valid_from_ = iv_at_from_stop.to_,
+                                      .duration_ = n::footpath::kMaxDuration,
+                                      .transport_mode_payload_ = id.to_id()});
           }
         }
       }

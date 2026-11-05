@@ -320,7 +320,7 @@ std::size_t n_rides_in_response(json::array const& ja) {
 void fix_first_mile_duration(std::vector<nr::journey>& journeys,
                              std::vector<nr::start> const& first_mile,
                              std::vector<nr::start> const& prev_first_mile,
-                             n::transport_mode_id_t const mode) {
+                             transport_mode_id_t const mode) {
   for (auto const [curr, prev] : utl::zip(first_mile, prev_first_mile)) {
 
     auto const uses_prev = [&,
@@ -366,7 +366,7 @@ void fix_first_mile_duration(std::vector<nr::journey>& journeys,
 void fix_last_mile_duration(std::vector<nr::journey>& journeys,
                             std::vector<nr::start> const& last_mile,
                             std::vector<nr::start> const& prev_last_mile,
-                            n::transport_mode_id_t const mode) {
+                            transport_mode_id_t const mode) {
   for (auto const [curr, prev] : utl::zip(last_mile, prev_last_mile)) {
     auto const uses_prev =
         [&, prev2 = prev /* hack for MacOS - fixed with 16 */](auto const& j) {
@@ -412,7 +412,7 @@ void add_direct_odm(std::vector<direct_ride> const& direct,
                     place_t const& from,
                     place_t const& to,
                     bool arrive_by,
-                    n::transport_mode_id_t const mode) {
+                    transport_mode_id_t const mode) {
   auto from_l = std::visit(
       utl::overloaded{[](osr::location const&) {
                         return get_special_station(n::special_station::kStart);

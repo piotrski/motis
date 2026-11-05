@@ -2,6 +2,7 @@
 
 #include "nigiri/loader/dir.h"
 #include "nigiri/loader/gtfs/load_timetable.h"
+#include "nigiri/loader/import_context.h"
 #include "nigiri/loader/init_finish.h"
 #include "nigiri/common/parse_time.h"
 #include "nigiri/routing/journey.h"
@@ -61,26 +62,26 @@ TRANSFERS: 0
      FROM: (START, START) [1970-01-01 09:57]
        TO: (END, END) [1970-01-01 12:00]
 leg 0: (START, START) [1970-01-01 09:57] -> (A, A) [1970-01-01 10:55]
-  MUMO (id=17, duration=58)
+  MUMO (payload=17, duration=58)
 leg 1: (A, A) [1970-01-01 10:55] -> (A, A) [1970-01-01 11:00]
   FOOTPATH (duration=5)
 leg 2: (A, A) [1970-01-01 11:00] -> (END, END) [1970-01-01 12:00]
-  MUMO (id=0, duration=60)
+  MUMO (payload=0, duration=60)
 
 [1970-01-01 09:57, 1970-01-01 14:46]
 TRANSFERS: 0
      FROM: (START, START) [1970-01-01 09:57]
        TO: (END, END) [1970-01-01 14:46]
 leg 0: (START, START) [1970-01-01 09:57] -> (A, A) [1970-01-01 10:55]
-  MUMO (id=17, duration=58)
+  MUMO (payload=17, duration=58)
 leg 1: (A, A) [1970-01-01 10:55] -> (A, A) [1970-01-01 11:00]
   FOOTPATH (duration=5)
 leg 2: (A, A) [1970-01-01 11:00] -> (C, C) [1970-01-01 13:00]
-  MUMO (id=1000000, duration=120)
+  MUMO (payload=1000000, duration=120)
 leg 3: (C, C) [1970-01-01 13:00] -> (C, C) [1970-01-01 14:07]
   FOOTPATH (duration=67)
 leg 4: (C, C) [1970-01-01 14:07] -> (END, END) [1970-01-01 14:46]
-  MUMO (id=17, duration=39)
+  MUMO (payload=17, duration=39)
 
 )";
 
@@ -88,14 +89,15 @@ TEST(odm, prima_update) {
   n::timetable tt;
   tt.date_range_ = {date::sys_days{2017_y / January / 1},
                     date::sys_days{2017_y / January / 2}};
-  n::loader::register_special_stations(tt);
+  auto ctx = n::loader::import_context{tt};
+  n::loader::register_special_stations(tt, ctx);
   auto const src = n::source_idx_t{0};
   n::loader::gtfs::load_timetable({.default_tz_ = "Europe/Berlin"}, src,
-                                  tt_files(), tt);
-  n::loader::finalize(tt);
+                                  tt_files(), tt, ctx);
+  n::loader::finalize(tt, ctx);
 
   auto const get_loc_idx = [&](auto&& s) {
-    return tt.locations_.location_id_to_idx_.at({.id_ = s, .src_ = src});
+    return tt.find({.id_ = s, .src_ = src}).value();
   };
 
   auto const loc = osr::location{};
