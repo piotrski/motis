@@ -73,16 +73,15 @@ elevator_footpath_map_t compute_footpaths(
     std::vector<n::footpath> missing_;
     std::vector<n::location_idx_t> neighbors_;
     std::vector<osr::location> neighbors_loc_;
-    std::vector<osr::match_t> neighbor_candidates_;
+    osr::match_result neighbor_candidates_;
   };
 
   auto n_done = 0U;
-  auto candidates = vector_map<n::location_idx_t, osr::match_t>{};
+  // One flat store for all locations; bucket index == location index.
+  auto candidates = osr::match_result{};
   auto transfers = n::vector_map<n::location_idx_t, std::vector<n::footpath>>(
       tt.n_locations());
   for (auto const& mode : settings) {
-    candidates.clear();
-    candidates.resize(tt.n_locations());
     for (auto& fps : transfers) {
       fps.clear();
     }
@@ -154,20 +153,27 @@ elevator_footpath_map_t compute_footpaths(
                 }
               });
 
-          auto const results = osr::route(
-              to_profile_parameters(mode.profile_, {}), w, lookup,
-              mode.profile_, get_loc(tt, w, pl, matches, l),
-              utl::transform_to(s.neighbors_, s.neighbors_loc_,
-                                [&](n::location_idx_t const x) {
-                                  return get_loc(tt, w, pl, matches, x);
-                                }),
-              candidates[l],
-              utl::transform_to(
-                  s.neighbors_, s.neighbor_candidates_,
-                  [&](n::location_idx_t const x) { return candidates[x]; }),
-              static_cast<osr::cost_t>(mode.max_duration_.count()),
-              osr::direction::kForward, nullptr, nullptr, elevations,
-              [](osr::path const& p) { return p.uses_elevator_; });
+          auto const results =
+              osr::route_one_to_many(
+                  to_profile_parameters(mode.profile_, {}), w, lookup,
+                  mode.profile_, get_loc(tt, w, pl, matches, l),
+                  utl::transform_to(s.neighbors_, s.neighbors_loc_,
+                                    [&](n::location_idx_t const x) {
+                                      return get_loc(tt, w, pl, matches, x);
+                                    }),
+                  candidates[osr::match_idx_t{to_idx(l)}],
+                  [&]() -> osr::match_result const& {
+                    s.neighbor_candidates_.clear();
+                    for (auto const x : s.neighbors_) {
+                      s.neighbor_candidates_.append(
+                          candidates, osr::match_idx_t{to_idx(x)});
+                    }
+                    return s.neighbor_candidates_;
+                  }(),
+                  mode.max_duration_, osr::direction::kForward, nullptr,
+                  nullptr, elevations,
+                  [](osr::path const& p) { return p.uses_elevator_; })
+                  ->results();
 
           for (auto const [n, r] : utl::zip(s.neighbors_, results)) {
             if (!r.has_value()) {
@@ -175,7 +181,7 @@ elevator_footpath_map_t compute_footpaths(
             }
 
             auto const duration = n::duration_t{
-                static_cast<unsigned>(std::ceil(r->cost_ / 60.0))};
+                static_cast<unsigned>(std::ceil(r->duration_.count() / 60.0))};
             transfers[l].emplace_back(n::footpath{n, duration});
 
             if (mode.profile_ == osr::search_profile::kWheelchair) {
