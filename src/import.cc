@@ -535,7 +535,7 @@ void import(config const& c,
              .max_duration_ = 8h,
              .is_candidate_ = [&](n::location_idx_t const l) {
                return utl::any_of(d.tt_->location_routes_[l], [&](auto r) {
-                 return d.tt_->has_car_transport(r);
+                 return d.tt_->is_flag_set(nigiri::kCarsAllowed, r);
                });
              }}};
         auto const elevator_footpath_map = compute_footpaths(
