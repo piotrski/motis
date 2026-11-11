@@ -80,6 +80,15 @@ struct feeds {
     return out;
   }
 
+  std::string vehicle_route(std::string const& vehicle_id) const {
+    for (auto const& e : vp_.entity()) {
+      if (e.has_vehicle() && e.vehicle().vehicle().id() == vehicle_id) {
+        return e.vehicle().trip().route_id();
+      }
+    }
+    return "";
+  }
+
   std::string vehicle_trip(std::string const& vehicle_id) const {
     for (auto const& e : vp_.entity()) {
       if (e.has_vehicle() && e.vehicle().vehicle().id() == vehicle_id) {
@@ -281,52 +290,25 @@ TEST(gtfsrt_duplicate_trips, copy_is_named_by_licence_plate) {
 TEST(gtfsrt_duplicate_trips, split_is_idempotent) {
   auto t = fixture{"test/duplicate-trips-idempotent"};
   auto f = feeds{"1620"};
-  auto const first = t.split(f);
+  t.split(f);
   auto const tu = f.tu_.SerializeAsString();
   auto const vp = f.vp_.SerializeAsString();
   auto const again = t.split(f);
-  EXPECT_EQ(first.copies_, again.copies_);
-  EXPECT_EQ(0U, again.dropped_);
+  EXPECT_EQ(0U, again.trips_);
   EXPECT_EQ(tu, f.tu_.SerializeAsString());
   EXPECT_EQ(vp, f.vp_.SerializeAsString());
-
-  // A last-good TripUpdates snapshot with a fresh positions feed: the copy's
-  // vehicle is moved onto the copy again.
-  auto fresh = feeds{"1620"};
-  fresh.tu_ = f.tu_;
-  t.split(fresh);
-  EXPECT_EQ(kCopy075, fresh.vehicle_trip("PR773"));
 }
 
-// A last-good positions snapshot was saved after the split. With fresh
-// TripUpdates the decision is made again, not inherited from the snapshot.
-TEST(gtfsrt_duplicate_trips, cached_positions_follow_a_new_keeper) {
-  auto t = fixture{"test/duplicate-trips-cached-positions"};
-  auto cached = feeds{"1620"};
-  t.split(cached);
-  ASSERT_EQ(kCopy075, cached.vehicle_trip("PR773"));
-
-  // PR773 now keeps the trip, BH411 gets the copy.
+// rt_update caches a feed as received when the split changes it, so a replay
+// is decided afresh.
+TEST(gtfsrt_duplicate_trips, split_only_runs_with_several_trip_updates) {
+  auto t = fixture{"test/duplicate-trips-detect"};
   auto f = feeds{"1620"};
-  delay_bh411(f);
-  f.vp_ = cached.vp_;
+  auto const unsplit =
+      std::array<gtfsrt::FeedMessage const*, 2>{&f.tu_, &f.vp_};
+  EXPECT_TRUE(has_duplicate_trip_updates(unsplit));
   t.split(f);
-  EXPECT_EQ(kT075, f.vehicle_trip("PR773"));
-  EXPECT_EQ(std::string{kT075} + "~BH411", f.vehicle_trip("411"));
-
-  // Only PR773 still sends a TripUpdate: its position names the trip again.
-  auto alone = feeds{"1620"};
-  auto& entities = *alone.tu_.mutable_entity();
-  for (auto i = 0; i != entities.size(); ++i) {
-    if (entities[i].trip_update().trip().trip_id() == kT075 &&
-        entities[i].trip_update().vehicle().id() == "411") {
-      entities.DeleteSubrange(i, 1);
-      break;
-    }
-  }
-  alone.vp_ = cached.vp_;
-  t.split(alone);
-  EXPECT_EQ(kT075, alone.vehicle_trip("PR773"));
+  EXPECT_FALSE(has_duplicate_trip_updates(unsplit));
 }
 
 // PR773's position is 200 s old: too old to keep its TripUpdate, but young
@@ -345,6 +327,7 @@ TEST(gtfsrt_duplicate_trips, dropped_vehicle_leaves_the_run) {
   ASSERT_EQ(1U, left.size());
   EXPECT_EQ("411", vehicle(left[0]));
   EXPECT_EQ("", f.vehicle_trip("PR773"));
+  EXPECT_EQ("139", f.vehicle_route("PR773"));  // still on the map as 139
 }
 
 // Two endpoints of one dataset each send one of the TripUpdates.

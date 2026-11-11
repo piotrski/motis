@@ -46,8 +46,9 @@ struct duplicate_trip_stats {
 //    vehicle's next run, or a vehicle that stopped reporting). If no vehicle
 //    is on the run yet, the TripUpdate of a vehicle with fresh GPS elsewhere
 //    that is closest to schedule stays, and the others are removed. A removed
-//    vehicle's old position that still names the run loses its trip, so it
-//    does not predict the run from GPS either.
+//    vehicle's old position that still names the run loses its trip id,
+//    start date and start time (not its route), so it does not predict the
+//    run from GPS either.
 //
 // A vehicle is named by its licence plate where the feed has one (ZTP fleet
 // numbers repeat across its bus and tram feeds), else by its vehicle id.
@@ -55,15 +56,19 @@ struct duplicate_trip_stats {
 // positions name different vehicles is not joined. Runs whose TripUpdates
 // name no vehicle are left as sent.
 //
-// The messages may hold this pass's own output (a last good snapshot is
-// saved after it): copies and relabelled positions are undone first, so each
-// pass decides afresh, and running it again on its own output gives the same
-// result.
+// It changes the messages in place. Cache the feeds as received, so a
+// replayed snapshot is decided afresh. Running it again on its own output
+// changes nothing.
 duplicate_trip_stats split_duplicate_trip_updates(
     nigiri::timetable const&,
     nigiri::source_idx_t,
     std::span<transit_realtime::FeedMessage* const> messages,
     std::int64_t now_seconds,
     std::int64_t max_gps_age_seconds = kDuplicateTripMaxGpsAgeSeconds);
+
+// Whether split_duplicate_trip_updates would change these messages: some run
+// has more than one SCHEDULED TripUpdate.
+bool has_duplicate_trip_updates(
+    std::span<transit_realtime::FeedMessage const* const> messages);
 
 }  // namespace motis

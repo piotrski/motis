@@ -1170,6 +1170,10 @@ void run_rt_update(boost::asio::io_context& ioc,
               std::optional<transit_realtime::FeedMessage>
                   differential_positions_msg_{};
               std::optional<std::int64_t> provider_observed_at_seconds_{};
+              // The feed as received, if the duplicate trip split changes
+              // msg_: the last good snapshot keeps it, so a replay is split
+              // afresh.
+              std::optional<transit_realtime::FeedMessage> unsplit_msg_{};
             };
             struct prepared_auser_update {
               std::size_t endpoint_idx_;
@@ -1518,7 +1522,7 @@ void run_rt_update(boost::asio::io_context& ioc,
                     }
                   }
                   if (prepared.commit_last_good_) {
-                    commit_last_good(g, msg);
+                    commit_last_good(g, prepared.unsplit_msg_.value_or(msg));
                   }
                   return stats;
                 };
@@ -1753,8 +1757,18 @@ void run_rt_update(boost::asio::io_context& ioc,
                   }
                 }
               }
-              if (messages.empty()) {
+              if (messages.empty() ||
+                  !has_duplicate_trip_updates(
+                      std::span<transit_realtime::FeedMessage const* const>{
+                          messages.data(), messages.size()})) {
                 continue;
+              }
+              for (auto& update : group.updates_) {
+                if (auto* const p = std::get_if<prepared_gtfsrt_update>(&update);
+                    p != nullptr && p->commit_last_good_ &&
+                    p->msg_.has_value()) {
+                  p->unsplit_msg_ = *p->msg_;
+                }
               }
               auto const split = split_duplicate_trip_updates(
                   *d.tt_, group.src_, messages,
