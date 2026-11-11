@@ -173,6 +173,20 @@ constexpr std::int64_t minute(std::int64_t const unix) {
   return unix / 60 * 60;
 }
 
+// Pushes BH411's TripUpdate for …075 an hour late, so PR773 is closer to
+// schedule.
+void delay_bh411(feeds& f) {
+  for (auto& e : *f.tu_.mutable_entity()) {
+    if (e.trip_update().trip().trip_id() == kT075 &&
+        e.trip_update().vehicle().id() == "411") {
+      for (auto& stu : *e.mutable_trip_update()->mutable_stop_time_update()) {
+        stu.mutable_arrival()->set_time(stu.arrival().time() + 3600);
+        stu.mutable_departure()->set_time(stu.departure().time() + 3600);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 TEST(gtfsrt_duplicate_trips, second_vehicle_gets_its_own_run) {
@@ -248,23 +262,17 @@ TEST(gtfsrt_duplicate_trips, stale_gps_keeps_the_closest_to_schedule) {
   auto const left = f.trip_updates(kT075);
   ASSERT_EQ(1U, left.size());
   EXPECT_EQ("411", vehicle(left[0]));
-  EXPECT_EQ(kT075, f.vehicle_trip("PR773"));
+  // PR773's old position no longer names the run it was dropped from.
+  EXPECT_EQ(kT075, f.vehicle_trip("411"));
+  EXPECT_EQ("", f.vehicle_trip("PR773"));
 }
 
 TEST(gtfsrt_duplicate_trips, copy_is_named_by_licence_plate) {
   auto t = fixture{"test/duplicate-trips-plate"};
   auto f = feeds{"1620"};
-  // Push BH411's forecast an hour late so PR773 keeps the trip. The
-  // TripUpdate names BH411 "411"; its copy takes the plate from its position.
-  for (auto& e : *f.tu_.mutable_entity()) {
-    if (e.trip_update().trip().trip_id() == kT075 &&
-        e.trip_update().vehicle().id() == "411") {
-      for (auto& stu : *e.mutable_trip_update()->mutable_stop_time_update()) {
-        stu.mutable_arrival()->set_time(stu.arrival().time() + 3600);
-        stu.mutable_departure()->set_time(stu.departure().time() + 3600);
-      }
-    }
-  }
+  // PR773 keeps the trip. The TripUpdate names BH411 "411"; its copy takes
+  // the plate from its position.
+  delay_bh411(f);
   t.split(f);
   EXPECT_EQ(kT075, f.vehicle_trip("PR773"));
   EXPECT_EQ(std::string{kT075} + "~BH411", f.vehicle_trip("411"));
@@ -273,11 +281,11 @@ TEST(gtfsrt_duplicate_trips, copy_is_named_by_licence_plate) {
 TEST(gtfsrt_duplicate_trips, split_is_idempotent) {
   auto t = fixture{"test/duplicate-trips-idempotent"};
   auto f = feeds{"1620"};
-  t.split(f);
+  auto const first = t.split(f);
   auto const tu = f.tu_.SerializeAsString();
   auto const vp = f.vp_.SerializeAsString();
   auto const again = t.split(f);
-  EXPECT_EQ(0U, again.copies_);
+  EXPECT_EQ(first.copies_, again.copies_);
   EXPECT_EQ(0U, again.dropped_);
   EXPECT_EQ(tu, f.tu_.SerializeAsString());
   EXPECT_EQ(vp, f.vp_.SerializeAsString());
@@ -288,6 +296,98 @@ TEST(gtfsrt_duplicate_trips, split_is_idempotent) {
   fresh.tu_ = f.tu_;
   t.split(fresh);
   EXPECT_EQ(kCopy075, fresh.vehicle_trip("PR773"));
+}
+
+// A last-good positions snapshot was saved after the split. With fresh
+// TripUpdates the decision is made again, not inherited from the snapshot.
+TEST(gtfsrt_duplicate_trips, cached_positions_follow_a_new_keeper) {
+  auto t = fixture{"test/duplicate-trips-cached-positions"};
+  auto cached = feeds{"1620"};
+  t.split(cached);
+  ASSERT_EQ(kCopy075, cached.vehicle_trip("PR773"));
+
+  // PR773 now keeps the trip, BH411 gets the copy.
+  auto f = feeds{"1620"};
+  delay_bh411(f);
+  f.vp_ = cached.vp_;
+  t.split(f);
+  EXPECT_EQ(kT075, f.vehicle_trip("PR773"));
+  EXPECT_EQ(std::string{kT075} + "~BH411", f.vehicle_trip("411"));
+
+  // Only PR773 still sends a TripUpdate: its position names the trip again.
+  auto alone = feeds{"1620"};
+  auto& entities = *alone.tu_.mutable_entity();
+  for (auto i = 0; i != entities.size(); ++i) {
+    if (entities[i].trip_update().trip().trip_id() == kT075 &&
+        entities[i].trip_update().vehicle().id() == "411") {
+      entities.DeleteSubrange(i, 1);
+      break;
+    }
+  }
+  alone.vp_ = cached.vp_;
+  t.split(alone);
+  EXPECT_EQ(kT075, alone.vehicle_trip("PR773"));
+}
+
+// PR773's position is 200 s old: too old to keep its TripUpdate, but young
+// enough for GPS predictions. It must not predict the run either.
+TEST(gtfsrt_duplicate_trips, dropped_vehicle_leaves_the_run) {
+  auto t = fixture{"test/duplicate-trips-dropped-position"};
+  auto f = feeds{"1620"};
+  for (auto& e : *f.vp_.mutable_entity()) {
+    if (e.vehicle().vehicle().id() == "PR773") {
+      e.mutable_vehicle()->set_timestamp(
+          static_cast<std::uint64_t>(f.now() - 200));
+    }
+  }
+  t.split(f);
+  auto const left = f.trip_updates(kT075);
+  ASSERT_EQ(1U, left.size());
+  EXPECT_EQ("411", vehicle(left[0]));
+  EXPECT_EQ("", f.vehicle_trip("PR773"));
+}
+
+// Two endpoints of one dataset each send one of the TripUpdates.
+TEST(gtfsrt_duplicate_trips, trip_updates_of_two_messages_are_split) {
+  auto t = fixture{"test/duplicate-trips-two-messages"};
+  auto f = feeds{"1620"};
+  auto second = gtfsrt::FeedMessage{};
+  *second.mutable_header() = f.tu_.header();
+  auto& entities = *f.tu_.mutable_entity();
+  for (auto i = 0; i != entities.size(); ++i) {
+    if (entities[i].trip_update().trip().trip_id() == kT075 &&
+        entities[i].trip_update().vehicle().id() == "PR773") {
+      *second.add_entity() = entities[i];
+      entities.DeleteSubrange(i, 1);
+      break;
+    }
+  }
+  auto messages = std::array{&f.tu_, &second, &f.vp_};
+  auto const stats = split_duplicate_trip_updates(t.tt(), n::source_idx_t{0},
+                                                  messages, f.now());
+  EXPECT_EQ(1U, stats.copies_);
+  ASSERT_EQ(1, second.entity_size());
+  EXPECT_EQ(kCopy075,
+            second.entity(0).trip_update().trip_properties().trip_id());
+  EXPECT_EQ(kCopy075, f.vehicle_trip("PR773"));
+}
+
+// Fleet number 411 is also another fleet's vehicle in the same dataset: the
+// TripUpdate naming "411" cannot be joined to a position.
+TEST(gtfsrt_duplicate_trips, ambiguous_fleet_number_is_not_joined) {
+  auto t = fixture{"test/duplicate-trips-ambiguous"};
+  auto f = feeds{"1620"};
+  auto& other = *f.vp_.add_entity();
+  other.set_id("tram_411");
+  other.mutable_vehicle()->mutable_vehicle()->set_id("411");
+  other.mutable_vehicle()->mutable_vehicle()->set_license_plate("RP411");
+  other.mutable_vehicle()->mutable_trip()->set_trip_id("other");
+  other.mutable_vehicle()->set_timestamp(static_cast<std::uint64_t>(f.now()));
+  auto const stats = t.split(f);
+  EXPECT_EQ(0U, stats.copies_);
+  auto const left = f.trip_updates(kT075);
+  ASSERT_EQ(1U, left.size());
+  EXPECT_EQ("PR773", vehicle(left[0]));
 }
 
 TEST(gtfsrt_duplicate_trips, trip_updates_without_vehicles_are_kept) {

@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -31,12 +32,75 @@ struct vehicle_report {
   std::string identity_;
   std::string trip_id_;
   std::string start_date_;
+  std::string start_time_;
   std::int64_t timestamp_{std::numeric_limits<std::int64_t>::min()};
   std::vector<gtfsrt::VehiclePosition*> positions_;
+  // Positions with this vehicle id name different vehicles (fleet numbers of
+  // two fleets in one dataset): they are not joined to TripUpdates.
+  bool ambiguous_{false};
 };
 
 std::string const& identity(gtfsrt::VehicleDescriptor const& v) {
   return v.license_plate().empty() ? v.id() : v.license_plate();
+}
+
+// The last good snapshot of a feed is saved after this pass and replayed
+// when a fetch fails, possibly next to a fresh feed of the other kind. Undo
+// the earlier split, so each pass decides afresh which vehicle keeps a run:
+// copies become SCHEDULED TripUpdates again, and positions name the
+// scheduled trip again.
+void undo_split(std::span<gtfsrt::FeedMessage* const> messages) {
+  auto copy_ids = std::map<std::string, std::string>{};
+  for (auto* const msg : messages) {
+    for (auto& entity : *msg->mutable_entity()) {
+      if (!entity.has_trip_update()) {
+        continue;
+      }
+      auto& tu = *entity.mutable_trip_update();
+      auto const& trip_id = tu.trip().trip_id();
+      auto const& copy_id = tu.trip_properties().trip_id();
+      if (tu.trip().schedule_relationship() !=
+              gtfsrt::TripDescriptor_ScheduleRelationship_DUPLICATED ||
+          trip_id.empty() || copy_id.size() <= trip_id.size() + 1U ||
+          !copy_id.starts_with(trip_id + "~")) {
+        continue;
+      }
+      auto const suffix = copy_id.substr(trip_id.size());
+      if (entity.id().ends_with(suffix)) {
+        entity.set_id(
+            entity.id().substr(0, entity.id().size() - suffix.size()));
+      }
+      copy_ids.emplace(copy_id, trip_id);
+      tu.mutable_trip()->set_schedule_relationship(
+          gtfsrt::TripDescriptor_ScheduleRelationship_SCHEDULED);
+      tu.mutable_trip_properties()->clear_trip_id();
+      if (tu.trip_properties().ByteSizeLong() == 0U) {
+        tu.clear_trip_properties();
+      }
+    }
+  }
+  for (auto* const msg : messages) {
+    for (auto& entity : *msg->mutable_entity()) {
+      if (!entity.has_vehicle() || !entity.vehicle().has_trip()) {
+        continue;
+      }
+      auto& vp = *entity.mutable_vehicle();
+      auto const& trip_id = vp.trip().trip_id();
+      if (auto const it = copy_ids.find(trip_id); it != end(copy_ids)) {
+        vp.mutable_trip()->set_trip_id(it->second);
+        continue;
+      }
+      auto const tilde = trip_id.rfind('~');
+      if (tilde == std::string::npos || tilde == 0U) {
+        continue;
+      }
+      auto const suffix = std::string_view{trip_id}.substr(tilde + 1U);
+      if (!suffix.empty() && (suffix == vp.vehicle().license_plate() ||
+                              suffix == vp.vehicle().id())) {
+        vp.mutable_trip()->set_trip_id(trip_id.substr(0, tilde));
+      }
+    }
+  }
 }
 
 std::map<std::string, vehicle_report> vehicle_reports(
@@ -52,14 +116,19 @@ std::map<std::string, vehicle_report> vehicle_reports(
       }
       auto* const vp = entity.mutable_vehicle();
       auto& report = reports[vp->vehicle().id()];
+      if (!report.positions_.empty() &&
+          report.identity_ != identity(vp->vehicle())) {
+        report.ambiguous_ = true;
+      }
       report.positions_.push_back(vp);
       auto const timestamp = vp->has_timestamp()
                                  ? static_cast<std::int64_t>(vp->timestamp())
                                  : header_timestamp;
-      if (timestamp >= report.timestamp_) {
+      if (report.positions_.size() == 1U || timestamp >= report.timestamp_) {
         report.identity_ = identity(vp->vehicle());
         report.trip_id_ = vp->trip().trip_id();
         report.start_date_ = vp->trip().start_date();
+        report.start_time_ = vp->trip().start_time();
         report.timestamp_ = timestamp;
       }
     }
@@ -132,11 +201,18 @@ std::optional<std::int64_t> schedule_deviation(n::timetable const& tt,
   return std::nullopt;
 }
 
+// A TripUpdate entity: its message and index.
+struct entity_ref {
+  gtfsrt::FeedMessage* msg_;
+  int idx_;
+};
+
 struct run_update {
-  int entity_idx_;
+  entity_ref entity_;
   std::string identity_;
   vehicle_report* vehicle_{nullptr};
   bool fresh_{false};
+  bool names_run_{false};
   bool on_run_{false};
   std::int64_t deviation_{};
 };
@@ -150,15 +226,16 @@ duplicate_trip_stats split_duplicate_trip_updates(
     std::int64_t const now_seconds,
     std::int64_t const max_gps_age_seconds) {
   auto stats = duplicate_trip_stats{};
+  undo_split(messages);
   auto reports = vehicle_reports(messages);
   auto const today = std::chrono::floor<date::days>(
       std::chrono::sys_seconds{std::chrono::seconds{now_seconds}});
-  // Removed only at the end: `reports` points into the messages.
-  auto dropped = std::map<gtfsrt::FeedMessage*, std::vector<int>>{};
 
+  // A run is (trip id, start date, start time), across all messages of the
+  // dataset (several endpoints can report the same run).
+  using run_key = std::tuple<std::string, std::string, std::string>;
+  auto runs = std::map<run_key, std::vector<entity_ref>>{};
   for (auto* const msg : messages) {
-    using run_key = std::tuple<std::string, std::string, std::string>;
-    auto runs = std::map<run_key, std::vector<int>>{};
     for (auto i = 0; i != msg->entity_size(); ++i) {
       auto const& entity = msg->entity(i);
       if (!entity.has_trip_update() ||
@@ -171,108 +248,111 @@ duplicate_trip_stats split_duplicate_trip_updates(
               gtfsrt::TripDescriptor_ScheduleRelationship_SCHEDULED) {
         continue;
       }
-      runs[{td.trip_id(), td.start_date(), td.start_time()}].push_back(i);
+      runs[{td.trip_id(), td.start_date(), td.start_time()}].push_back(
+          {msg, i});
+    }
+  }
+
+  // Removed only at the end: `reports` and `runs` point into the messages.
+  auto dropped = std::map<gtfsrt::FeedMessage*, std::vector<int>>{};
+  for (auto const& [key, entities] : runs) {
+    if (entities.size() < 2U) {
+      continue;
+    }
+    auto const& [trip_id, start_date, start_time] = key;
+    auto const names_run = [&](std::string const& vp_trip_id,
+                               std::string const& vp_start_date,
+                               std::string const& vp_start_time) {
+      return vp_trip_id == trip_id &&
+             (vp_start_date.empty() || start_date.empty() ||
+              vp_start_date == start_date) &&
+             (vp_start_time.empty() || start_time.empty() ||
+              vp_start_time == start_time);
+    };
+    auto const names_this_run = [&](gtfsrt::VehiclePosition const& vp) {
+      return names_run(vp.trip().trip_id(), vp.trip().start_date(),
+                       vp.trip().start_time());
+    };
+
+    auto updates = std::vector<run_update>{};
+    for (auto const e : entities) {
+      auto const& tu = e.msg_->entity(e.idx_).trip_update();
+      auto& u = updates.emplace_back(run_update{.entity_ = e});
+      if (!tu.vehicle().id().empty()) {
+        if (auto const it = reports.find(tu.vehicle().id());
+            it != end(reports) && !it->second.ambiguous_) {
+          u.vehicle_ = &it->second;
+        }
+      }
+      u.identity_ = !tu.vehicle().license_plate().empty()
+                        ? tu.vehicle().license_plate()
+                    : u.vehicle_ != nullptr ? u.vehicle_->identity_
+                                            : tu.vehicle().id();
+      u.fresh_ = u.vehicle_ != nullptr &&
+                 u.vehicle_->timestamp_ >= now_seconds - max_gps_age_seconds;
+      u.names_run_ = u.vehicle_ != nullptr &&
+                     names_run(u.vehicle_->trip_id_, u.vehicle_->start_date_,
+                               u.vehicle_->start_time_);
+      u.on_run_ = u.fresh_ && u.names_run_;
+      u.deviation_ = schedule_deviation(tt, src, today, tu)
+                         .value_or(std::numeric_limits<std::int64_t>::max());
+    }
+    if (std::ranges::all_of(
+            updates, [](run_update const& u) { return u.identity_.empty(); })) {
+      continue;  // the feed does not say which vehicles these are
+    }
+    ++stats.trips_;
+
+    auto const any_on_run = std::ranges::any_of(updates, &run_update::on_run_);
+    auto const any_fresh = std::ranges::any_of(updates, &run_update::fresh_);
+    auto const eligible = [&](run_update const& u) {
+      return any_on_run ? u.on_run_ : !any_fresh || u.fresh_;
+    };
+    auto keeper = static_cast<run_update const*>(nullptr);
+    for (auto const& u : updates) {
+      if (eligible(u) &&
+          (keeper == nullptr || u.deviation_ < keeper->deviation_)) {
+        keeper = &u;
+      }
     }
 
-    // Copies from an earlier pass (a last-good snapshot) keep their vehicle's
-    // position on the copy when only the positions feed is new.
-    for (auto const& entity : msg->entity()) {
-      if (!entity.has_trip_update() ||
-          entity.trip_update().trip().schedule_relationship() !=
-              gtfsrt::TripDescriptor_ScheduleRelationship_DUPLICATED) {
+    auto used = std::vector<std::string>{keeper->identity_};
+    for (auto const& u : updates) {
+      if (&u == keeper) {
         continue;
       }
-      auto const& tu = entity.trip_update();
-      auto const it = reports.find(tu.vehicle().id());
-      if (it == end(reports) ||
-          tu.trip_properties().trip_id() !=
-              tu.trip().trip_id() + "~" + it->second.identity_) {
-        continue;
-      }
-      for (auto* const vp : it->second.positions_) {
-        if (vp->trip().trip_id() == tu.trip().trip_id()) {
-          vp->mutable_trip()->set_trip_id(tu.trip_properties().trip_id());
-        }
-      }
-    }
-
-    for (auto const& [key, entity_indices] : runs) {
-      if (entity_indices.size() < 2U) {
-        continue;
-      }
-      auto const& trip_id = std::get<0>(key);
-      auto updates = std::vector<run_update>{};
-      for (auto const i : entity_indices) {
-        auto const& tu = msg->entity(i).trip_update();
-        auto& u = updates.emplace_back(run_update{.entity_idx_ = i});
-        if (!tu.vehicle().id().empty()) {
-          if (auto const it = reports.find(tu.vehicle().id());
-              it != end(reports)) {
-            u.vehicle_ = &it->second;
+      auto const same_vehicle =
+          u.identity_.empty() ||
+          std::ranges::find(used, u.identity_) != end(used);
+      if (!any_on_run || !u.on_run_ || same_vehicle) {
+        dropped[u.entity_.msg_].push_back(u.entity_.idx_);
+        // A vehicle whose TripUpdate is dropped but whose old position still
+        // names the run must not predict the run from GPS either.
+        if (!same_vehicle && u.names_run_ && !u.fresh_) {
+          for (auto* const vp : u.vehicle_->positions_) {
+            if (names_this_run(*vp)) {
+              vp->clear_trip();
+            }
           }
+          u.vehicle_->trip_id_.clear();
         }
-        u.identity_ = !tu.vehicle().license_plate().empty()
-                          ? tu.vehicle().license_plate()
-                      : u.vehicle_ != nullptr ? u.vehicle_->identity_
-                                              : tu.vehicle().id();
-        u.fresh_ = u.vehicle_ != nullptr &&
-                   u.vehicle_->timestamp_ >= now_seconds - max_gps_age_seconds;
-        u.on_run_ =
-            u.fresh_ &&
-            (u.vehicle_->trip_id_ == trip_id ||
-             u.vehicle_->trip_id_ == trip_id + "~" + u.identity_) &&
-            (u.vehicle_->start_date_.empty() || std::get<1>(key).empty() ||
-             u.vehicle_->start_date_ == std::get<1>(key));
-        u.deviation_ = schedule_deviation(tt, src, today, tu)
-                           .value_or(std::numeric_limits<std::int64_t>::max());
+        continue;
       }
-      if (std::ranges::all_of(updates, [](run_update const& u) {
-            return u.identity_.empty();
-          })) {
-        continue;  // the feed does not say which vehicles these are
-      }
-      ++stats.trips_;
-
-      auto const any_on_run =
-          std::ranges::any_of(updates, &run_update::on_run_);
-      auto const any_fresh = std::ranges::any_of(updates, &run_update::fresh_);
-      auto const eligible = [&](run_update const& u) {
-        return any_on_run ? u.on_run_ : !any_fresh || u.fresh_;
-      };
-      auto keeper = static_cast<run_update const*>(nullptr);
-      for (auto const& u : updates) {
-        if (eligible(u) &&
-            (keeper == nullptr || u.deviation_ < keeper->deviation_)) {
-          keeper = &u;
+      used.push_back(u.identity_);
+      auto const copy_id = trip_id + "~" + u.identity_;
+      auto& entity = *u.entity_.msg_->mutable_entity(u.entity_.idx_);
+      entity.set_id(entity.id() + "~" + u.identity_);
+      auto& tu = *entity.mutable_trip_update();
+      tu.mutable_trip()->set_schedule_relationship(
+          gtfsrt::TripDescriptor_ScheduleRelationship_DUPLICATED);
+      tu.mutable_trip_properties()->set_trip_id(copy_id);
+      for (auto* const vp : u.vehicle_->positions_) {
+        if (names_this_run(*vp)) {
+          vp->mutable_trip()->set_trip_id(copy_id);
         }
       }
-
-      auto used = std::vector<std::string>{keeper->identity_};
-      for (auto const& u : updates) {
-        if (&u == keeper) {
-          continue;
-        }
-        if (!any_on_run || !u.on_run_ || u.identity_.empty() ||
-            std::ranges::find(used, u.identity_) != end(used)) {
-          dropped[msg].push_back(u.entity_idx_);
-          continue;
-        }
-        used.push_back(u.identity_);
-        auto const copy_id = trip_id + "~" + u.identity_;
-        auto& entity = *msg->mutable_entity(u.entity_idx_);
-        entity.set_id(entity.id() + "~" + u.identity_);
-        auto& tu = *entity.mutable_trip_update();
-        tu.mutable_trip()->set_schedule_relationship(
-            gtfsrt::TripDescriptor_ScheduleRelationship_DUPLICATED);
-        tu.mutable_trip_properties()->set_trip_id(copy_id);
-        for (auto* const vp : u.vehicle_->positions_) {
-          if (vp->trip().trip_id() == trip_id) {
-            vp->mutable_trip()->set_trip_id(copy_id);
-          }
-        }
-        u.vehicle_->trip_id_ = copy_id;
-        ++stats.copies_;
-      }
+      u.vehicle_->trip_id_ = copy_id;
+      ++stats.copies_;
     }
   }
 
