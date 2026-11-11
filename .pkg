@@ -1,7 +1,7 @@
 [nigiri]
   url=https://github.com/piotrski/nigiri.git
-  branch=patches/upstream-1ccdf697
-  commit=56b13d78700fab7758c2e3912f3ce2d19b7ac60f
+  branch=fix/gtfsrt-duplicated-trips
+  commit=f47e494f51cd329bb4c6b5ebf5f46f3d52bdaeb5
 [cista]
   url=git@github.com:felixguendling/cista.git
   branch=master

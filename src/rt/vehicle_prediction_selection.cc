@@ -111,7 +111,11 @@ provider_timing_extraction extract_provider_timing(
     provider_trip_resolver const& resolve) {
   auto result = provider_timing_extraction{};
   for (auto const& entity : message.entity()) {
-    if (!entity.has_trip_update()) {
+    // A DUPLICATED copy names the scheduled trip it copies: its times are
+    // another vehicle's, not the scheduled trip's.
+    if (!entity.has_trip_update() ||
+        entity.trip_update().trip().schedule_relationship() ==
+            transit_realtime::TripDescriptor_ScheduleRelationship_DUPLICATED) {
       continue;
     }
     auto const& update = entity.trip_update();

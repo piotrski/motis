@@ -6,7 +6,7 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 
 ### nigiri base
 
-- `.pkg` pins `piotrski/nigiri@patches/upstream-1ccdf697` (`56b13d78`): upstream nigiri `1ccdf697` (#452, the same commit upstream MOTIS `4e2b1676a` uses) with the fork's GTFS-RT patches below rebased on top, plus `56b13d78`, which ports the fork's rt tests to `loader::load` after #450. The old pin was `fix/gtfsrt-adjacent-service-day` at `86e872d6`.
+- `.pkg` pins `piotrski/nigiri@fix/gtfsrt-duplicated-trips` (`f47e494f`), the duplicated-trips patch below on top of `patches/upstream-1ccdf697` (`56b13d78`): upstream nigiri `1ccdf697` (#452, the same commit upstream MOTIS `4e2b1676a` uses) with the fork's GTFS-RT patches below rebased on top, plus `56b13d78`, which ports the fork's rt tests to `loader::load` after #450. The old pin was `fix/gtfsrt-adjacent-service-day` at `86e872d6`.
 - Picked up with this base: update_lbs perf (`aadccd05`, #445), the bitfield copy fix (`e07e3bea`), compact timetable storage (#449 `8ab457b2`, #450 `012e623b`, #451 `49cdab21`), one trip id per trip (#452), route flags, `transport_mode_t` offsets, reflexive transfer times, and RT changes #419, #439 and #441.
 - `nigiri_bin_ver` goes from 33 to 37, so every deployment needs a full re-import.
 - Behavior changes picked up:
@@ -43,6 +43,17 @@ This fork keeps `master` close to `upstream/master` and carries deployable runti
 - Tests to run:
   - `nigiri-test --gtest_filter='rt.gtfsrt_version_switch_twin'`
   - `nigiri-test --gtest_filter='rt.*'`
+
+### GTFS-RT duplicate trip split
+
+- Status: still required while ZTP Kraków sends two TripUpdates for one trip when a second vehicle stands in. Not upstream.
+- Source: `piotrski/nigiri@fix/gtfsrt-duplicated-trips` (on top of `patches/upstream-1ccdf697`, which `.pkg` pins), `src/rt/gtfsrt_duplicate_trips.cc`
+- Purpose: on 2026-11-10 line 139, BH411 and PR773 both sent a TripUpdate for `20261109_1_130082075_11`. nigiri applied both to one run, last writer wins per stop, and passed stops froze BH411's times while PR773 was half an hour behind. Before nigiri sees a cycle's feeds, `split_duplicate_trip_updates` (called from `rt_update.cc`) looks at every run with more than one SCHEDULED TripUpdate across the dataset's messages. The last good snapshot keeps the feed as received, so a replay is split afresh. A snapshot loaded because applying a feed failed is split on its own. Vehicles are named by licence plate (joined from the dataset's VehiclePositions by vehicle id, since ZTP TripUpdates only carry `vehicle.id`). Of the vehicles whose GPS (at most 120 s old) is on the run, the one closest to schedule keeps the run. Each other one becomes a `DUPLICATED` TripUpdate with `trip_properties.trip_id` `<trip>~<plate>`, and its VehiclePosition is moved to that id. TripUpdates of vehicles not on the run are dropped (forecasts for the next trip, ghosts). If no vehicle is on the run yet, the fresh TripUpdate closest to schedule stays. A dropped vehicle's stale position that still names the run loses its trip id, start date and start time, but keeps its route, so it doesn't predict the run from GPS and the map still shows its line. A vehicle id whose positions carry different plates isn't joined. Runs whose TripUpdates name no vehicle are left alone.
+- nigiri: `DUPLICATED` with a new `trip_properties.trip_id` and no new start date or time adds an RT-only run over the trip's own stops with its static schedule (`rt_timetable::duplicated_from`), so it shows its own delay and trip name. Stop times are matched to the static trip, propagated against its schedule, and a different stop_id with a stop_sequence is a platform change. GPS predictions only run on scheduled runs, so a copy has the feed's times. A copy with a shifted start is counted as unsupported. `vehicle_prediction_selection` skips `DUPLICATED` updates, and `passed_stops` only follows SCHEDULED ones, so a copy never feeds the original run.
+- Decision record: transit `docs/adr/0002-split-duplicate-trip-updates.md`
+- Tests to run:
+  - `nigiri-test --gtest_filter='duplicated_fixture.*:rt.*'`
+  - `motis-test --gtest_filter='gtfsrt_duplicate_trips.*:passed_stops.*:vehicle_prediction*.*:motis_rt_update.*'`
 
 ### GTFS-RT service day inference
 

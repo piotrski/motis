@@ -52,6 +52,7 @@
 #include "motis/http_req.h"
 #include "motis/railviz.h"
 #include "motis/rt/auser.h"
+#include "motis/rt/gtfsrt_duplicate_trips.h"
 #include "motis/rt/gtfsrt_service_day.h"
 #include "motis/rt/passed_stops.h"
 #include "motis/rt/rt_metrics.h"
@@ -1169,6 +1170,10 @@ void run_rt_update(boost::asio::io_context& ioc,
               std::optional<transit_realtime::FeedMessage>
                   differential_positions_msg_{};
               std::optional<std::int64_t> provider_observed_at_seconds_{};
+              // The feed as received, if the duplicate trip split changes
+              // msg_: the last good snapshot keeps it, so a replay is split
+              // afresh.
+              std::optional<transit_realtime::FeedMessage> unsplit_msg_{};
             };
             struct prepared_auser_update {
               std::size_t endpoint_idx_;
@@ -1517,7 +1522,7 @@ void run_rt_update(boost::asio::io_context& ioc,
                     }
                   }
                   if (prepared.commit_last_good_) {
-                    commit_last_good(g, msg);
+                    commit_last_good(g, prepared.unsplit_msg_.value_or(msg));
                   }
                   return stats;
                 };
@@ -1736,6 +1741,49 @@ void run_rt_update(boost::asio::io_context& ioc,
             }
             set_phase("feed_prepare", feed_prepare_started);
 
+            // Runs that several vehicles report are split into one run per
+            // vehicle before nigiri applies any message of the dataset (see
+            // gtfsrt_duplicate_trips.h).
+            for (auto& group : groups) {
+              auto messages = std::vector<transit_realtime::FeedMessage*>{};
+              for (auto& update : group.updates_) {
+                if (auto* const p = std::get_if<prepared_gtfsrt_update>(&update);
+                    p != nullptr) {
+                  if (p->msg_.has_value()) {
+                    messages.push_back(&*p->msg_);
+                  }
+                  if (p->differential_positions_msg_.has_value()) {
+                    messages.push_back(&*p->differential_positions_msg_);
+                  }
+                }
+              }
+              if (messages.empty() ||
+                  !has_duplicate_trip_updates(
+                      std::span<transit_realtime::FeedMessage const* const>{
+                          messages.data(), messages.size()})) {
+                continue;
+              }
+              for (auto& update : group.updates_) {
+                if (auto* const p = std::get_if<prepared_gtfsrt_update>(&update);
+                    p != nullptr && p->commit_last_good_ &&
+                    p->msg_.has_value()) {
+                  p->unsplit_msg_ = *p->msg_;
+                }
+              }
+              auto const split = split_duplicate_trip_updates(
+                  *d.tt_, group.src_, messages,
+                  std::chrono::duration_cast<std::chrono::seconds>(
+                      now.time_since_epoch())
+                      .count());
+              if (split.trips_ != 0U) {
+                n::log(n::log_lvl::info, "motis.rt",
+                       "GTFS-RT runs with several vehicles for tag={}: "
+                       "runs={}, copies={}, dropped={}",
+                       group.tag_, split.trips_, split.copies_,
+                       split.dropped_);
+              }
+            }
+
             auto const apply_prepared_gtfsrt = [&](prepared_gtfsrt_update&
                                                        prepared) {
               auto const& g =
@@ -1761,6 +1809,28 @@ void run_rt_update(boost::asio::io_context& ioc,
                        "RT APPLY ERROR: tag={}, error={}", g.tag_, e.what());
                 auto fallback = prepare_last_good(prepared.endpoint_idx_, g);
                 if (fallback.msg_) {
+                  // The last good snapshot is cached as received, and the
+                  // dataset was split before it was loaded. Split it on its
+                  // own: without the other feeds' positions, the vehicle
+                  // closest to schedule keeps the run and the rest are
+                  // dropped.
+                  auto fallback_messages =
+                      std::vector<transit_realtime::FeedMessage*>{
+                          &*fallback.msg_};
+                  if (fallback.differential_positions_msg_.has_value()) {
+                    fallback_messages.push_back(
+                        &*fallback.differential_positions_msg_);
+                  }
+                  if (has_duplicate_trip_updates(
+                          std::span<transit_realtime::FeedMessage const* const>{
+                              fallback_messages.data(),
+                              fallback_messages.size()})) {
+                    split_duplicate_trip_updates(
+                        *d.tt_, g.src_, fallback_messages,
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            now.time_since_epoch())
+                            .count());
+                  }
                   try {
                     results[prepared.endpoint_idx_] = {
                         apply_gtfsrt(g, fallback, *fallback.msg_, true), false};
