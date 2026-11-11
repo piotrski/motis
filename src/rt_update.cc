@@ -52,6 +52,7 @@
 #include "motis/http_req.h"
 #include "motis/railviz.h"
 #include "motis/rt/auser.h"
+#include "motis/rt/gtfsrt_duplicate_trips.h"
 #include "motis/rt/gtfsrt_service_day.h"
 #include "motis/rt/passed_stops.h"
 #include "motis/rt/rt_metrics.h"
@@ -1735,6 +1736,39 @@ void run_rt_update(boost::asio::io_context& ioc,
                   });
             }
             set_phase("feed_prepare", feed_prepare_started);
+
+            // Runs that several vehicles report are split into one run per
+            // vehicle before nigiri applies any message of the dataset (see
+            // gtfsrt_duplicate_trips.h).
+            for (auto& group : groups) {
+              auto messages = std::vector<transit_realtime::FeedMessage*>{};
+              for (auto& update : group.updates_) {
+                if (auto* const p = std::get_if<prepared_gtfsrt_update>(&update);
+                    p != nullptr) {
+                  if (p->msg_.has_value()) {
+                    messages.push_back(&*p->msg_);
+                  }
+                  if (p->differential_positions_msg_.has_value()) {
+                    messages.push_back(&*p->differential_positions_msg_);
+                  }
+                }
+              }
+              if (messages.empty()) {
+                continue;
+              }
+              auto const split = split_duplicate_trip_updates(
+                  *d.tt_, group.src_, messages,
+                  std::chrono::duration_cast<std::chrono::seconds>(
+                      now.time_since_epoch())
+                      .count());
+              if (split.trips_ != 0U) {
+                n::log(n::log_lvl::info, "motis.rt",
+                       "GTFS-RT runs with several vehicles for tag={}: "
+                       "runs={}, copies={}, dropped={}",
+                       group.tag_, split.trips_, split.copies_,
+                       split.dropped_);
+              }
+            }
 
             auto const apply_prepared_gtfsrt = [&](prepared_gtfsrt_update&
                                                        prepared) {
