@@ -1809,6 +1809,28 @@ void run_rt_update(boost::asio::io_context& ioc,
                        "RT APPLY ERROR: tag={}, error={}", g.tag_, e.what());
                 auto fallback = prepare_last_good(prepared.endpoint_idx_, g);
                 if (fallback.msg_) {
+                  // The last good snapshot is cached as received, and the
+                  // dataset was split before it was loaded. Split it on its
+                  // own: without the other feeds' positions, the vehicle
+                  // closest to schedule keeps the run and the rest are
+                  // dropped.
+                  auto fallback_messages =
+                      std::vector<transit_realtime::FeedMessage*>{
+                          &*fallback.msg_};
+                  if (fallback.differential_positions_msg_.has_value()) {
+                    fallback_messages.push_back(
+                        &*fallback.differential_positions_msg_);
+                  }
+                  if (has_duplicate_trip_updates(
+                          std::span<transit_realtime::FeedMessage const* const>{
+                              fallback_messages.data(),
+                              fallback_messages.size()})) {
+                    split_duplicate_trip_updates(
+                        *d.tt_, g.src_, fallback_messages,
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            now.time_since_epoch())
+                            .count());
+                  }
                   try {
                     results[prepared.endpoint_idx_] = {
                         apply_gtfsrt(g, fallback, *fallback.msg_, true), false};
